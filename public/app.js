@@ -3824,6 +3824,14 @@ async function enviarCortePDF(turnoId, numero, nombreDest) {
 }
 
 function _htmlCortePDF(turno, ventas) {
+  // Calcular totales directamente desde las ventas (no desde la tabla turnos que es 0 en turno abierto)
+  const arr = ventas || [];
+  const totVentas  = arr.reduce((s,v)=>s+(parseFloat(v.total)||0), 0);
+  const totEfect   = arr.reduce((s,v)=>s+(v.forma_pago==='efectivo'?parseFloat(v.total)||0:0), 0);
+  const totTarjeta = arr.reduce((s,v)=>s+(v.forma_pago==='tarjeta'?parseFloat(v.total)||0:0), 0);
+  const totTransf  = arr.reduce((s,v)=>s+(v.forma_pago==='transferencia'?parseFloat(v.total)||0:0), 0);
+  const fondoIni   = parseFloat(turno.fondo_inicial||0);
+  const efecEsper  = fondoIni + totEfect;
   const suc = turno.sucursal_nombre || USER?.sucursal || '';
   return `
     <h2>${USER?.empresa || 'METRIC POS'}</h2>
@@ -3835,17 +3843,13 @@ function _htmlCortePDF(turno, ventas) {
     </p>
     <hr>
     <table>
-      <tr><td>N° Ventas</td><td class="right tot">${ventas?.length||0}</td></tr>
-      <tr><td>Total Ventas</td><td class="right tot">L. ${(turno.total_ventas||0).toFixed(2)}</td></tr>
-      <tr><td>Efectivo</td><td class="right">L. ${(turno.total_efectivo||0).toFixed(2)}</td></tr>
-      <tr><td>Tarjeta</td><td class="right">L. ${(turno.total_tarjeta||0).toFixed(2)}</td></tr>
-      <tr><td>Transferencia</td><td class="right">L. ${(turno.total_transferencia||0).toFixed(2)}</td></tr>
-      <tr><td>Fondo Inicial</td><td class="right">L. ${(turno.fondo_inicial||0).toFixed(2)}</td></tr>
-      <tr><td>Efectivo Esperado</td><td class="right">L. ${(turno.efectivo_esperado||0).toFixed(2)}</td></tr>
-      <tr><td>Efectivo Contado</td><td class="right">L. ${(turno.efectivo_contado||0).toFixed(2)}</td></tr>
-      <tr><td><b>Diferencia</b></td><td class="right tot" style="color:${(turno.diferencia||0)>=0?'#15803d':'#dc2626'}">
-        L. ${(turno.diferencia||0).toFixed(2)}
-      </td></tr>
+      <tr><td>N° Ventas</td><td class="right tot">${arr.length}</td></tr>
+      <tr><td>Total Ventas</td><td class="right tot">L. ${totVentas.toFixed(2)}</td></tr>
+      <tr><td>Efectivo</td><td class="right">L. ${totEfect.toFixed(2)}</td></tr>
+      <tr><td>Tarjeta</td><td class="right">L. ${totTarjeta.toFixed(2)}</td></tr>
+      <tr><td>Transferencia</td><td class="right">L. ${totTransf.toFixed(2)}</td></tr>
+      <tr><td>Fondo Inicial</td><td class="right">L. ${fondoIni.toFixed(2)}</td></tr>
+      <tr><td>Efectivo Esperado</td><td class="right">L. ${efecEsper.toFixed(2)}</td></tr>
     </table>
     ${ventas?.length ? `
     <h3 style="margin-top:16px">Detalle de Facturas</h3>
