@@ -3625,6 +3625,17 @@ async function renderTurnosCajero() {
     turnoActivoCajero = ta || null;
   } catch(e) { turnoActivoCajero = null; }
 
+  // Auto-refresh cada 30 segundos si hay turno activo
+  if (turnoActivoCajero && !window._turnoRefreshTimer) {
+    window._turnoRefreshTimer = setInterval(async () => {
+      if (currentView === 'turnos') renderTurnosCajero();
+    }, 30000);
+  }
+  if (!turnoActivoCajero && window._turnoRefreshTimer) {
+    clearInterval(window._turnoRefreshTimer);
+    window._turnoRefreshTimer = null;
+  }
+
   const numWha = await GET('/whatsapp').catch(()=>[]);
 
   v.innerHTML = `

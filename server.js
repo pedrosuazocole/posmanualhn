@@ -836,8 +836,20 @@ app.get('/api/sync/estado',auth(['admin']),(req,res)=>res.json({pendientes:get(`
 app.get('/api/turnos/activo',auth(),(req,res)=>{
   try {
     const suc=req.user.sucursal_id;
-    const turno=get(`SELECT t.*,u.nombre as usuario_nombre FROM turnos t LEFT JOIN usuarios u ON u.id=t.usuario_id WHERE t.sucursal_id=? AND t.estado='abierto' ORDER BY t.fecha_apertura DESC LIMIT 1`,[suc]);
-    res.json(turno||null);
+    const turno=get(`SELECT t.*,u.nombre as usuario_nombre FROM turnos t LEFT JOIN usuarios u ON u.id=t.usuario_id WHERE t.sucursal_id=? AND t.usuario_id=? AND t.estado='abierto' ORDER BY t.fecha_apertura DESC LIMIT 1`,[suc,req.user.id]);
+    if(!turno){ res.json(null); return; }
+    // Calcular totales en tiempo real desde las ventas del turno
+    const resumen=get(`SELECT
+      COALESCE(SUM(total),0) as total_ventas,
+      COALESCE(SUM(CASE WHEN forma_pago='efectivo' THEN total ELSE 0 END),0) as total_efectivo,
+      COALESCE(SUM(CASE WHEN forma_pago='tarjeta' THEN total ELSE 0 END),0) as total_tarjeta,
+      COALESCE(SUM(CASE WHEN forma_pago='transferencia' THEN total ELSE 0 END),0) as total_transferencia
+      FROM ventas WHERE turno_id=? AND estado='emitida'`,[turno.id])||{};
+    turno.total_ventas        = resumen.total_ventas        || 0;
+    turno.total_efectivo      = resumen.total_efectivo      || 0;
+    turno.total_tarjeta       = resumen.total_tarjeta       || 0;
+    turno.total_transferencia = resumen.total_transferencia || 0;
+    res.json(turno);
   } catch(e){ console.error('turnos/activo:',e.message); res.status(500).json({error:e.message}); }
 });
 app.get('/api/turnos',auth(['admin','supervisor']),(req,res)=>{
