@@ -3956,7 +3956,7 @@ async function eliminarWhatsApp(id) {
   } catch(e) { alert(e.message); }
 }
 
-// ── Descargar Productos como Excel CSV ─────────────────────────────────────────
+// ── Descargar Productos como Excel (.xlsx) ──────────────────────────────────────
 function descargarProductosExcel() {
   const datos = products_cache;
   if (!datos || !datos.length) { alert('No hay productos para descargar.'); return; }
@@ -3964,26 +3964,19 @@ function descargarProductosExcel() {
   const filas = datos.map(function(p) {
     return [
       p.codigo||'', p.nombre||'', p.categoria||'',
-      parseFloat(p.precio_venta||0).toFixed(2),
-      parseFloat(p.costo||0).toFixed(2),
+      parseFloat(p.precio_venta||0),
+      parseFloat(p.costo||0),
       parseInt(p.stock||0), parseInt(p.stock_min||0),
       p.gravado ? 'Si' : 'No', p.tasa_isv||15
     ];
   });
-  var lineas = [hdrs].concat(filas).map(function(row) {
-    return row.map(function(v){ return '"'+String(v).replace(/"/g,'""')+'"'; }).join(',');
-  });
-  var csv = lineas.join('\n');
-  var blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8'});
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
-  a.href = url;
-  a.download = 'productos_'+new Date().toISOString().substring(0,10)+'.csv';
-  a.click();
-  URL.revokeObjectURL(url);
+  var ws = XLSX.utils.aoa_to_sheet([hdrs].concat(filas));
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Productos');
+  XLSX.writeFile(wb, 'productos_'+new Date().toISOString().substring(0,10)+'.xlsx');
 }
 
-// ── Descargar Inventario (existencias) como Excel CSV ──────────────────────────
+// ── Descargar Inventario como Excel (.xlsx) ─────────────────────────────────────
 async function descargarInventarioExcel() {
   var inv = [];
   try { inv = await GET('/inventario', 'sucursal_id='+USER.sucursal_id); } catch(e) {
@@ -3998,22 +3991,15 @@ async function descargarInventarioExcel() {
     var precio = parseFloat(p.precio_venta||0);
     var estado = stock<=0?'Sin stock':stock<=minimo?'Bajo minimo':'OK';
     return [p.codigo||'',p.nombre||'',p.categoria||'',stock,minimo,
-      costo.toFixed(2),precio.toFixed(2),(stock*costo).toFixed(2),(stock*precio).toFixed(2),estado];
+      costo,precio,parseFloat((stock*costo).toFixed(2)),parseFloat((stock*precio).toFixed(2)),estado];
   });
   var totCosto = inv.reduce(function(s,p){return s+parseInt(p.stock||0)*parseFloat(p.costo||0);},0);
   var totVenta = inv.reduce(function(s,p){return s+parseInt(p.stock||0)*parseFloat(p.precio_venta||0);},0);
-  filas.push(['','','TOTALES','','','','',totCosto.toFixed(2),totVenta.toFixed(2),'']);
-  var lineas = [hdrs].concat(filas).map(function(row) {
-    return row.map(function(v){ return '"'+String(v).replace(/"/g,'""')+'"'; }).join(',');
-  });
-  var csv = lineas.join('\n');
-  var blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8'});
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
-  a.href = url;
-  a.download = 'inventario_'+new Date().toISOString().substring(0,10)+'.csv';
-  a.click();
-  URL.revokeObjectURL(url);
+  filas.push(['','','TOTALES','','','','',parseFloat(totCosto.toFixed(2)),parseFloat(totVenta.toFixed(2)),'']);
+  var ws = XLSX.utils.aoa_to_sheet([hdrs].concat(filas));
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Inventario');
+  XLSX.writeFile(wb, 'inventario_'+new Date().toISOString().substring(0,10)+'.xlsx');
 }
 
 function showToastMsg(msg) {
