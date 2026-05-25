@@ -2150,7 +2150,7 @@ function facAddToCart(p) {
       costo: p.costo || 0, cantidad: 1,
       gravado: esServ ? false : p.gravado,
       isv18: isv18Flag, tasaIsv,
-      stockMax: esServ ? 9999 : stockDisponible
+      stockMax: 9999
     });
   }
   renderFacCart();
