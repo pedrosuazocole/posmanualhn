@@ -2316,7 +2316,7 @@ async function processFacInvoice() {
       isv15, isv18, total: afterDisc, exonerado: facExonerado,
       forma_pago: facFormaPago, monto_recibido: recibido, cambio, banco_id: fac_banco_id,
       orden_compra_exenta: facOrdenCompra, constancia_registro: facConstancia, identificativo_sag: facSAG,
-      turno_id: null, serie_id: facSerieId
+      turno_id: turnoActivoCajero?.id || null, serie_id: facSerieId
     });
 
     // Siempre imprime en carta
