@@ -2130,14 +2130,7 @@ function facAddToCart(p) {
   const cantidadEnCarrito = enCarrito ? enCarrito.cantidad : 0;
   const esServ = (p.categoria||'').toLowerCase() === 'servicios';
   const stockDisponible = p.stock || 0;
-  if (!esServ && stockDisponible <= 0) {
-    alert(`⚠️ "${p.nombre}" no tiene existencia en inventario.`);
-    return;
-  }
-  if (!esServ && cantidadEnCarrito >= stockDisponible) {
-    alert(`⚠️ "${p.nombre}" solo tiene ${stockDisponible} unidad(es) disponible(s).`);
-    return;
-  }
+  // Sin validación de stock — permite facturar sin existencia
   let tasaIsv = 0;
   let isv18Flag = false;
   // Servicios son siempre exentos de ISV
@@ -2168,10 +2161,6 @@ function facRemoveFromCart(id) { facCart = facCart.filter(i => i.id !== id); ren
 function facUpdateQty(id, qty) {
   if (qty <= 0) { facRemoveFromCart(id); return; }
   const item = facCart.find(i => i.id === id);
-  if (item && item.stockMax !== undefined && qty > item.stockMax) {
-    alert(`⚠️ Solo hay ${item.stockMax} unidad(es) disponible(s) de "${item.nombre}".`);
-    return;
-  }
   facCart = facCart.map(i => i.id===id ? {...i, cantidad: qty} : i);
   renderFacCart();
 }
