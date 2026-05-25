@@ -3788,38 +3788,71 @@ async function enviarCortePDF(turnoId, numero, nombreDest) {
     const data = await GET(`/turnos/${turnoId}/resumen`);
     const {turno, ventas} = data;
 
-    // Generar HTML del corte
-    const html = _htmlCortePDF(turno, ventas);
+    // Calcular totales desde ventas reales
+    const arr = ventas || [];
+    const totVentas  = arr.reduce((s,v)=>s+(parseFloat(v.total)||0),0);
+    const totEfect   = arr.reduce((s,v)=>s+(v.forma_pago==='efectivo'?parseFloat(v.total)||0:0),0);
+    const totTarjeta = arr.reduce((s,v)=>s+(v.forma_pago==='tarjeta'?parseFloat(v.total)||0:0),0);
+    const totTransf  = arr.reduce((s,v)=>s+(v.forma_pago==='transferencia'?parseFloat(v.total)||0:0),0);
+    const fondoIni   = parseFloat(turno.fondo_inicial||0);
 
-    // Usar la Web API de impresión para generar el PDF en el navegador
-    const win = window.open('', '_blank', 'width=600,height=800');
-    if (!win) return alert('Permite las ventanas emergentes para generar el PDF');
+    // Armar texto del corte para WhatsApp
+    const linea = '━━━━━━━━━━━━━━━━━━━━━━';
+    const empresa = USER?.empresa || 'METRIC POS';
+    const detalle = arr.length ? arr.map(function(v){ return '  '+(v.numero_factura||'')+' | '+(v.forma_pago||'')+' | L.'+parseFloat(v.total||0).toFixed(2); }).join('\n') : '  Sin ventas registradas';
+    const texto = [
+      `🏪 *${empresa}*`,
+      `📋 *CORTE DE CAJA*`,
+      linea,
+      `Turno ${turno.turno_letra||'A'} — ${turno.usuario_nombre||'Cajero'}`,
+      `Apertura: ${turno.fecha_apertura||'—'}`,
+      `Cierre: ${turno.fecha_cierre||'En curso'}`,
+      linea,
+      `🧾 N° Ventas:       ${arr.length}`,
+      `💰 Total Ventas:    L.${totVentas.toFixed(2)}`,
+      `💵 Efectivo:        L.${totEfect.toFixed(2)}`,
+      `💳 Tarjeta:         L.${totTarjeta.toFixed(2)}`,
+      `🏦 Transferencia:   L.${totTransf.toFixed(2)}`,
+      `📦 Fondo Inicial:   L.${fondoIni.toFixed(2)}`,
+      `📊 Efect. Esperado: L.${(fondoIni+totEfect).toFixed(2)}`,
+      linea,
+      `📝 *DETALLE DE FACTURAS:*`,
+      detalle,
+      linea,
+      `_Powered by MetricPOS_`
+    ].join('\n');
 
-    win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
-      <title>Corte de Caja</title>
-      <style>
-        body{font-family:Arial,sans-serif;font-size:12px;padding:20px;max-width:500px;margin:0 auto}
-        h2,h3{color:#1e3a5f;text-align:center;margin:4px 0}
-        table{width:100%;border-collapse:collapse;margin:10px 0}
-        td,th{padding:6px 8px;border-bottom:1px solid #f1f5f9;text-align:left}
-        th{background:#1e3a5f;color:#fff}
-        .tot{font-weight:700;font-size:14px}
-        .right{text-align:right}
-        @media print{@page{size:A4;margin:15mm}}
-      </style></head><body>
-      ${html}
-      <div style="margin-top:20px;padding:12px;background:#f0fdf4;border-radius:8px;text-align:center;font-size:12px;color:#15803d">
-        Para enviar por WhatsApp: Descarga este PDF e imprímelo en PDF, luego envíalo al número ${numero}
-      </div>
-      <div style="text-align:center;margin-top:16px">
-        <a href="https://wa.me/${numero.replace(/[^0-9]/g,'')}" target="_blank"
-          style="display:inline-block;background:#25d366;color:#fff;padding:10px 24px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px">
-          📱 Abrir WhatsApp con ${nombreDest}
-        </a>
-      </div>
-      <script>setTimeout(()=>window.print(),500);<\/script>
-      </body></html>`);
-    win.document.close();
+    // Número limpio (solo dígitos)
+    const tel = numero.replace(/[^0-9]/g,'');
+
+    // Link directo a WhatsApp con el texto del corte
+    const waUrl = `https://wa.me/${tel}?text=${encodeURIComponent(texto)}`;
+
+    // Mostrar modal de confirmación con el link
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center';
+    modal.innerHTML = `
+      <div style="background:#fff;border-radius:16px;padding:28px 24px;max-width:420px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+        <div style="text-align:center;margin-bottom:18px">
+          <div style="font-size:40px">📱</div>
+          <div style="font-size:18px;font-weight:800;color:#1e3a5f;margin-top:8px">Enviar Corte por WhatsApp</div>
+          <div style="font-size:13px;color:#64748b;margin-top:4px">Para: <b>${nombreDest}</b> (${numero})</div>
+        </div>
+        <div style="background:#f0fdf4;border-radius:10px;padding:14px;margin-bottom:18px;font-size:12px;color:#15803d;line-height:1.6;max-height:180px;overflow-y:auto;white-space:pre-wrap;font-family:monospace">${texto.replace(/\*/g,'').replace(/_/g,'')}</div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <a href="${waUrl}" target="_blank"
+            style="display:block;background:#25d366;color:#fff;padding:14px;border-radius:10px;text-decoration:none;font-weight:800;font-size:16px;text-align:center">
+            📱 Abrir WhatsApp con ${nombreDest}
+          </a>
+          <button onclick="this.closest('div[style]').remove()"
+            style="background:#f1f5f9;border:none;border-radius:10px;padding:12px;font-size:14px;cursor:pointer;color:#64748b">
+            Cerrar
+          </button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', e => { if(e.target===modal) modal.remove(); });
+
   } catch(e) { alert('Error: '+e.message); }
 }
 
