@@ -2063,7 +2063,6 @@ function renderFacProductGrid() {
               : sinStock
                 ? `<span style="background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">Sin stock</span>`
                 : `<span style="background:#f0fdf4;color:#15803d;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">${p.stock} uds</span>`;
-            const btnOk = srv || !sinStock;
             return `<tr style="border-bottom:1px solid #f1f5f9" onmouseover="this.style.background='#f8faff'" onmouseout="this.style.background=''">
               <td style="padding:9px 12px;font-family:monospace;font-size:12px;color:#64748b">${p.codigo}</td>
               <td style="padding:9px 12px;font-weight:600;color:#1e3a5f;font-size:13px">${p.nombre}</td>
@@ -2072,8 +2071,8 @@ function renderFacProductGrid() {
               <td style="padding:9px 12px;text-align:center">${isvTag}</td>
               <td style="padding:9px 12px;text-align:center">${stkTag}</td>
               <td style="padding:9px 12px;text-align:center">
-                <button onclick="facAddToCartById('${p.id}')" ${btnOk?'':'disabled'}
-                  style="padding:5px 14px;border:none;border-radius:7px;font-size:12px;font-weight:700;cursor:${btnOk?'pointer':'not-allowed'};background:${btnOk?'#2563eb':'#e2e8f0'};color:${btnOk?'#fff':'#94a3b8'};transition:background .15s">
+                <button onclick="facAddToCartById('${p.id}')" 
+                  style="padding:5px 14px;border:none;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff;transition:background .15s">
                   + Agregar
                 </button>
               </td>
@@ -2093,7 +2092,7 @@ function renderFacProductGrid() {
           ? `<span class="badge badge-red">Sin stock</span>`
           : `<span class="badge badge-gray">${p.stock} uds</span>`;
       return `<button class="product-card" onclick="facAddToCartById('${p.id}')"
-        style="${sinStock&&!srv?'opacity:0.5;cursor:not-allowed;':''}">
+        >
         <div class="prod-code">${p.codigo}</div>
         <div class="prod-name">${p.nombre}</div>
         <div class="prod-footer">
