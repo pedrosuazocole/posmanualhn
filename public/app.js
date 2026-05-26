@@ -3815,8 +3815,7 @@ async function abrirEnviarWhatsApp(turnoId) {
   const idx = parseInt(sel)-1;
   if (idx < 0 || idx >= numeros.length) return alert('Opción inválida');
 
-  const wa = numeros[idx];
-  await enviarCortePDF(turnoId, wa.numero, wa.nombre);
+  await enviarCortePDF(turnoId);
 }
 
 // ── Helper: armar texto de corte de caja formato ticket ──────────────────────
@@ -3919,27 +3918,37 @@ async function _textoArticulos(turnoId, turno, ventas) {
 async function enviarReportesAlCerrar(turnoId) {
   const numeros = await GET('/whatsapp').catch(()=>[]);
   if (!numeros.length) return; // Sin números configurados, no enviar
-  const wa = numeros[0]; // Enviar al primero configurado
-  await _mostrarModalReportes(turnoId, wa.numero, wa.nombre, true);
+  await _mostrarModalReportes(turnoId, numeros, true);
 }
 
 // ── Envío manual desde el botón del turno ────────────────────────────────────
-async function enviarCortePDF(turnoId, numero, nombreDest) {
-  await _mostrarModalReportes(turnoId, numero, nombreDest, false);
+async function enviarCortePDF(turnoId) {
+  const numeros = await GET('/whatsapp').catch(()=>[]);
+  if (!numeros.length) return alert('No hay números de WhatsApp configurados. Agrégalos en el módulo WhatsApp.');
+  await _mostrarModalReportes(turnoId, numeros, false);
 }
 
 // ── Modal principal con los 2 reportes ───────────────────────────────────────
-async function _mostrarModalReportes(turnoId, numero, nombreDest, autoCierre) {
+async function _mostrarModalReportes(turnoId, numeros, autoCierre) {
   try {
     const data = await GET('/turnos/'+turnoId+'/resumen');
     const {turno, ventas} = data;
-    const tel = numero.replace(/[^0-9]/g,'');
 
-    const textoCorte    = _textoCorte(turno, ventas);
+    const textoCorte     = _textoCorte(turno, ventas);
     const textoArticulos = await _textoArticulos(turnoId, turno, ventas);
 
-    const urlCorte    = 'https://wa.me/'+tel+'?text='+encodeURIComponent(textoCorte);
-    const urlArticulos= 'https://wa.me/'+tel+'?text='+encodeURIComponent(textoArticulos);
+    // Botón por cada número
+    const botonesHTML = numeros.map(function(wa) {
+      const t = wa.numero.replace(/[^0-9]/g,'');
+      const uc = 'https://wa.me/'+t+'?text='+encodeURIComponent(textoCorte);
+      const ua = 'https://wa.me/'+t+'?text='+encodeURIComponent(textoArticulos);
+      return '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;margin-bottom:6px">'
+        +'<div style="font-size:12px;font-weight:700;color:#1e3a5f;margin-bottom:8px">📱 '+wa.nombre+' — <span style="font-family:monospace;color:#64748b">'+wa.numero+'</span></div>'
+        +'<div style="display:flex;gap:8px">'
+        +'<a href="'+uc+'" target="_blank" style="flex:1;display:block;background:#25d366;color:#fff;padding:9px 6px;border-radius:8px;text-decoration:none;font-weight:700;font-size:12px;text-align:center">🧾 Corte</a>'
+        +'<a href="'+ua+'" target="_blank" style="flex:1;display:block;background:#2563eb;color:#fff;padding:9px 6px;border-radius:8px;text-decoration:none;font-weight:700;font-size:12px;text-align:center">📦 Artículos</a>'
+        +'</div></div>';
+    }).join('');
 
     const modal = document.createElement('div');
     modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
@@ -3950,7 +3959,7 @@ async function _mostrarModalReportes(turnoId, numero, nombreDest, autoCierre) {
         <div style="background:#1e3a5f;padding:18px 22px;display:flex;justify-content:space-between;align-items:center">
           <div>
             <div style="font-size:16px;font-weight:800;color:#fff">📱 Enviar Reportes por WhatsApp</div>
-            <div style="font-size:12px;color:#94a3b8;margin-top:2px">Para: <b style="color:#34d399">${nombreDest}</b> — ${numero}</div>
+            <div style="font-size:12px;color:#94a3b8;margin-top:2px">${numeros.length} número${numeros.length>1?"s":""} configurado${numeros.length>1?"s":""}</div>
           </div>
           <button onclick="this.closest('div[style*=fixed]').remove()"
             style="background:rgba(255,255,255,.15);border:none;border-radius:8px;padding:6px 12px;color:#fff;cursor:pointer;font-size:16px">✕</button>
@@ -3980,16 +3989,10 @@ async function _mostrarModalReportes(turnoId, numero, nombreDest, autoCierre) {
 
         <!-- Botones -->
         <div style="padding:14px 18px;border-top:1px solid #e2e8f0;display:flex;flex-direction:column;gap:8px">
-          <a id="btn-enviar-corte" href="${urlCorte}" target="_blank"
-            style="display:block;background:#25d366;color:#fff;padding:13px;border-radius:10px;text-decoration:none;font-weight:800;font-size:14px;text-align:center">
-            📤 Enviar Corte de Caja a ${nombreDest}
-          </a>
-          <a id="btn-enviar-arts" href="${urlArticulos}" target="_blank"
-            style="display:block;background:#2563eb;color:#fff;padding:13px;border-radius:10px;text-decoration:none;font-weight:800;font-size:14px;text-align:center">
-            📤 Enviar Artículos Vendidos a ${nombreDest}
-          </a>
+          <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Selecciona a quién enviar:</div>
+          ${botonesHTML}
           <button onclick="this.closest('div[style*=fixed]').remove()"
-            style="background:#f1f5f9;border:none;border-radius:10px;padding:11px;font-size:13px;cursor:pointer;color:#64748b;font-weight:600">
+            style="background:#f1f5f9;border:none;border-radius:10px;padding:11px;font-size:13px;cursor:pointer;color:#64748b;font-weight:600;margin-top:4px">
             Cerrar
           </button>
         </div>
