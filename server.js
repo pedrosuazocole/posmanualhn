@@ -169,6 +169,8 @@ function createSchema(){
     diferencia REAL DEFAULT 0,
     estado TEXT DEFAULT 'abierto' CHECK(estado IN('abierto','cerrado')),
     notas TEXT,
+    sobrante REAL DEFAULT 0,
+    motivo_sobrante TEXT,
     FOREIGN KEY(sucursal_id) REFERENCES sucursales(id),
     FOREIGN KEY(usuario_id) REFERENCES usuarios(id)
   )`);
@@ -224,6 +226,46 @@ function createSchema(){
     activa INTEGER DEFAULT 1,
     creado TEXT DEFAULT(datetime('now','-6 hours'))
   )`);
+  // ── TICKETS DE TURNO ──
+  db.run(`CREATE TABLE IF NOT EXISTS tickets(
+    id TEXT PRIMARY KEY,
+    turno_id TEXT,
+    cajero_id TEXT NOT NULL,
+    cajero_nombre TEXT,
+    turno_letra TEXT,
+    fecha_cierre TEXT,
+    estado TEXT DEFAULT 'abierto' CHECK(estado IN('abierto','en_revision','resuelto')),
+    total_ventas REAL DEFAULT 0,
+    reporte_articulos TEXT,
+    area TEXT,
+    titulo TEXT,
+    tipo TEXT,
+    descripcion TEXT,
+    prioridad TEXT DEFAULT 'media' CHECK(prioridad IN('urgente','alta','media','baja')),
+    asignado_a TEXT,
+    asignado_nombre TEXT,
+    fotos TEXT DEFAULT '[]',
+    creado TEXT DEFAULT(datetime('now','-6 hours'))
+  )`);
+  // Migraciones para BD existentes
+  try { db.run(`ALTER TABLE tickets ADD COLUMN area TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN titulo TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN tipo TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN descripcion TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN prioridad TEXT DEFAULT 'media'`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN asignado_a TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN asignado_nombre TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN fotos TEXT DEFAULT '[]'`); } catch(e) {}
+  db.run(`CREATE TABLE IF NOT EXISTS ticket_mensajes(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id TEXT NOT NULL,
+    usuario_id TEXT NOT NULL,
+    usuario_nombre TEXT,
+    usuario_rol TEXT,
+    mensaje TEXT NOT NULL,
+    creado TEXT DEFAULT(datetime('now','-6 hours')),
+    FOREIGN KEY(ticket_id) REFERENCES tickets(id)
+  )`);
   db.run(`CREATE TABLE IF NOT EXISTS whatsapp_numeros(
     id TEXT PRIMARY KEY,
     nombre TEXT NOT NULL,
@@ -232,6 +274,8 @@ function createSchema(){
     creado TEXT DEFAULT(datetime('now','-6 hours'))
   )`);
   try { db.run(`ALTER TABLE turnos ADD COLUMN turno_letra TEXT DEFAULT 'A'`); } catch(e) {}
+  try { db.run(`ALTER TABLE turnos ADD COLUMN sobrante REAL DEFAULT 0`); } catch(e) {}
+  try { db.run(`ALTER TABLE turnos ADD COLUMN motivo_sobrante TEXT`); } catch(e) {}
   // ── VENTA_ID EN CxC PARA VENTAS A CREDITO ──
   try { db.run(`ALTER TABLE cxc ADD COLUMN venta_id TEXT`); } catch(e) {}
   try { db.run(`ALTER TABLE ventas ADD COLUMN serie_id TEXT`); } catch(e) {}
@@ -768,10 +812,19 @@ app.get('/api/reportes/ventas_por_mes',auth(),(req,res)=>{
 });
 app.get('/api/reportes/articulos_por_dia',auth(),(req,res)=>{
   const suc=req.query.sucursal_id||req.user.sucursal_id;
-  const{fecha_ini,fecha_fin,serie}=req.query;
+  const{fecha_ini,fecha_fin,hora_ini,hora_fin,serie}=req.query;
   let w=`WHERE v.sucursal_id=? AND v.estado='emitida'`;const p=[suc];
-  if(fecha_ini){w+=` AND date(v.fecha)>=?`;p.push(fecha_ini);}
-  if(fecha_fin){w+=` AND date(v.fecha)<=?`;p.push(fecha_fin);}
+  // Filtro con hora: si hay hora usar datetime completo, si no solo fecha
+  if(fecha_ini){
+    const dIni = hora_ini ? fecha_ini+'T'+hora_ini : fecha_ini;
+    w += hora_ini ? ` AND datetime(v.fecha)>=datetime(?)` : ` AND date(v.fecha)>=?`;
+    p.push(dIni);
+  }
+  if(fecha_fin){
+    const dFin = hora_fin ? fecha_fin+'T'+hora_fin : fecha_fin;
+    w += hora_fin ? ` AND datetime(v.fecha)<=datetime(?)` : ` AND date(v.fecha)<=?`;
+    p.push(dFin);
+  }
   if(serie){w+=` AND v.numero_factura LIKE ?`;p.push(serie.replace(/-+$/,'')+'%');}
   res.json(all(`SELECT date(v.fecha)as dia,vi.producto_codigo,vi.producto_nombre,vi.producto_categoria,SUM(vi.cantidad)as unidades,SUM(vi.subtotal)as total FROM venta_items vi JOIN ventas v ON v.id=vi.venta_id ${w} GROUP BY dia,vi.producto_id ORDER BY dia DESC,total DESC`,p));
 });
@@ -862,6 +915,75 @@ app.get('/api/turnos',auth(['admin','supervisor']),(req,res)=>{
     res.json(all(`SELECT t.*,u.nombre as usuario_nombre FROM turnos t LEFT JOIN usuarios u ON u.id=t.usuario_id ${w} ORDER BY t.fecha_apertura DESC LIMIT 200`,p));
   } catch(e){ console.error('turnos GET:',e.message); res.status(500).json({error:e.message}); }
 });
+// Reporte consolidado de todos los turnos del día
+app.get('/api/turnos/consolidado_dia', auth(), (req, res) => {
+  try {
+    const suc  = req.query.sucursal_id || req.user.sucursal_id;
+    const fecha = req.query.fecha || new Date(Date.now()-6*3600000).toISOString().substring(0,10);
+
+    // Turnos del día (abiertos y cerrados)
+    const turnos = all(
+      `SELECT t.*, u.nombre as usuario_nombre
+       FROM turnos t LEFT JOIN usuarios u ON u.id=t.usuario_id
+       WHERE t.sucursal_id=? AND date(t.fecha_apertura)=?
+       ORDER BY t.turno_letra, t.fecha_apertura`,
+      [suc, fecha]);
+
+    // Para cada turno calcular totales reales desde ventas
+    turnos.forEach(t => {
+      const tot = get(
+        `SELECT COALESCE(SUM(total),0) as tv,
+                COALESCE(SUM(CASE WHEN forma_pago='efectivo'       THEN total ELSE 0 END),0) as te,
+                COALESCE(SUM(CASE WHEN forma_pago='tarjeta'        THEN total ELSE 0 END),0) as tt,
+                COALESCE(SUM(CASE WHEN forma_pago='transferencia'  THEN total ELSE 0 END),0) as tr,
+                COUNT(*) as nv
+         FROM ventas WHERE turno_id=? AND estado='emitida'`, [t.id]) || {};
+      t.tv = tot.tv||0; t.te = tot.te||0;
+      t.tt = tot.tt||0; t.tr = tot.tr||0; t.nv = tot.nv||0;
+
+      // Artículos vendidos en el turno
+      t.articulos = all(
+        `SELECT vi.producto_codigo, vi.producto_nombre, vi.producto_categoria,
+                SUM(vi.cantidad) as unidades, SUM(vi.subtotal) as total
+         FROM venta_items vi JOIN ventas v ON v.id=vi.venta_id
+         WHERE v.turno_id=? AND v.estado='emitida'
+         GROUP BY vi.producto_id ORDER BY total DESC`, [t.id]);
+    });
+
+    res.json({ fecha, turnos });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Turnos cerrados del propio cajero (para reimpresión)
+app.get('/api/turnos/mis_turnos',auth(),(req,res)=>{
+  try {
+    const limite = parseInt(req.query.limite)||10;
+    const rows = all(
+      `SELECT t.*,u.nombre as usuario_nombre FROM turnos t
+       LEFT JOIN usuarios u ON u.id=t.usuario_id
+       WHERE t.usuario_id=? AND t.estado='cerrado'
+       ORDER BY t.fecha_cierre DESC LIMIT ?`,
+      [req.user.id, limite]);
+    // Agregar totales reales desde ventas para cada turno
+    rows.forEach(t => {
+      const res2 = get(
+        `SELECT COALESCE(SUM(total),0) as tv,
+                COALESCE(SUM(CASE WHEN forma_pago='efectivo' THEN total ELSE 0 END),0) as te,
+                COALESCE(SUM(CASE WHEN forma_pago='tarjeta' THEN total ELSE 0 END),0) as tt,
+                COALESCE(SUM(CASE WHEN forma_pago='transferencia' THEN total ELSE 0 END),0) as tr,
+                COUNT(*) as nv
+         FROM ventas WHERE turno_id=? AND estado='emitida'`,
+        [t.id]) || {};
+      t.total_ventas        = res2.tv || 0;
+      t.total_efectivo      = res2.te || 0;
+      t.total_tarjeta       = res2.tt || 0;
+      t.total_transferencia = res2.tr || 0;
+      t.num_ventas          = res2.nv || 0;
+    });
+    res.json(rows);
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
 app.post('/api/turnos/abrir',auth(),(req,res)=>{
   try {
     const suc=req.user.sucursal_id;
@@ -879,14 +1001,15 @@ app.post('/api/turnos/:id/cerrar',auth(),(req,res)=>{
   try {
     const turno=get(`SELECT * FROM turnos WHERE id=? AND estado='abierto'`,[req.params.id]);
     if(!turno)return res.status(404).json({error:'Turno no encontrado o ya cerrado'});
-    const{efectivo_contado,notas}=req.body;
+    const{efectivo_contado,notas,sobrante,motivo_sobrante}=req.body;
     const resumen=get(`SELECT COALESCE(SUM(total),0)as total_ventas,COALESCE(SUM(CASE WHEN forma_pago='efectivo' THEN total ELSE 0 END),0)as total_efectivo,COALESCE(SUM(CASE WHEN forma_pago='tarjeta' THEN total ELSE 0 END),0)as total_tarjeta,COALESCE(SUM(CASE WHEN forma_pago='transferencia' THEN total ELSE 0 END),0)as total_transferencia FROM ventas WHERE turno_id=? AND estado='emitida'`,[req.params.id])||{};
     const egresos=get(`SELECT COALESCE(SUM(monto),0)as total FROM movimientos_caja WHERE turno_id=? AND tipo='egreso'`,[req.params.id])||{};
     const efectivo_esp=(turno.fondo_inicial||0)+(resumen.total_efectivo||0)-(egresos.total||0);
     const contado=parseFloat(efectivo_contado)||0;
     const diferencia=contado-efectivo_esp;
-    run(`UPDATE turnos SET estado='cerrado',fecha_cierre=datetime('now','-6 hours'),total_ventas=?,total_efectivo=?,total_tarjeta=?,total_transferencia=?,total_egresos=?,efectivo_esperado=?,efectivo_contado=?,diferencia=?,notas=? WHERE id=?`,
-      [resumen.total_ventas||0,resumen.total_efectivo||0,resumen.total_tarjeta||0,resumen.total_transferencia||0,egresos.total||0,efectivo_esp,contado,diferencia,notas||turno.notas||'',req.params.id]);
+    const sobranteVal=parseFloat(sobrante)||0;
+    run(`UPDATE turnos SET estado='cerrado',fecha_cierre=datetime('now','-6 hours'),total_ventas=?,total_efectivo=?,total_tarjeta=?,total_transferencia=?,total_egresos=?,efectivo_esperado=?,efectivo_contado=?,diferencia=?,notas=?,sobrante=?,motivo_sobrante=? WHERE id=?`,
+      [resumen.total_ventas||0,resumen.total_efectivo||0,resumen.total_tarjeta||0,resumen.total_transferencia||0,egresos.total||0,efectivo_esp,contado,diferencia,notas||turno.notas||'',sobranteVal,motivo_sobrante||'',req.params.id]);
     saveDB();
     res.json({ok:1,total_ventas:resumen.total_ventas||0,total_efectivo:resumen.total_efectivo||0,total_tarjeta:resumen.total_tarjeta||0,total_transferencia:resumen.total_transferencia||0,fondo_inicial:turno.fondo_inicial||0,egresos:egresos.total||0,efectivo_esperado:efectivo_esp,diferencia});
   } catch(e){ console.error('turnos/cerrar:',e.message); res.status(500).json({error:e.message}); }
@@ -925,6 +1048,127 @@ app.delete('/api/whatsapp/:id',auth(['admin']),(req,res)=>{
   run(`UPDATE whatsapp_numeros SET activo=0 WHERE id=?`,[req.params.id]);
   saveDB(); res.json({ok:1});
 });
+// ── TICKETS ──
+
+// Listar tickets con filtros (admin/supervisor ven todos; cajero solo los suyos)
+app.get('/api/tickets', auth(), (req, res) => {
+  try {
+    const rol = req.user.rol;
+    const { estado, prioridad, area, asignado_a } = req.query;
+    let w = rol === 'cajero' ? `WHERE t.cajero_id='${req.user.id}'` : 'WHERE 1=1';
+    if (estado)     w += ` AND t.estado='${estado}'`;
+    if (prioridad)  w += ` AND t.prioridad='${prioridad}'`;
+    if (area)       w += ` AND t.area='${area}'`;
+    if (asignado_a) w += ` AND t.asignado_a='${asignado_a}'`;
+    const rows = all(`SELECT t.*, u.nombre as cajero_nombre2
+      FROM tickets t LEFT JOIN usuarios u ON u.id=t.cajero_id
+      ${w} ORDER BY
+        CASE t.prioridad WHEN 'urgente' THEN 1 WHEN 'alta' THEN 2 WHEN 'media' THEN 3 ELSE 4 END,
+        t.creado DESC LIMIT 200`);
+    rows.forEach(t => {
+      const ult = get(`SELECT mensaje, usuario_nombre, creado FROM ticket_mensajes
+        WHERE ticket_id=? ORDER BY id DESC LIMIT 1`, [t.id]);
+      t.ultimo_mensaje = ult || null;
+      t.total_mensajes = (get(`SELECT COUNT(*) as c FROM ticket_mensajes WHERE ticket_id=?`, [t.id])||{}).c||0;
+    });
+    res.json(rows);
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Crear ticket (manual o automático al cerrar turno)
+app.post('/api/tickets', auth(), (req, res) => {
+  try {
+    const { turno_id, turno_letra, fecha_cierre, total_ventas, reporte_articulos,
+            area, titulo, tipo, descripcion, prioridad, asignado_a, fotos } = req.body;
+    const id = uuid();
+    // Obtener nombre del asignado
+    let asigNombre = '';
+    if (asignado_a) {
+      const u = get(`SELECT nombre FROM usuarios WHERE id=?`, [asignado_a]);
+      asigNombre = u?.nombre || '';
+    }
+    run(`INSERT INTO tickets(id,turno_id,cajero_id,cajero_nombre,turno_letra,fecha_cierre,
+          total_ventas,reporte_articulos,area,titulo,tipo,descripcion,prioridad,asignado_a,asignado_nombre,fotos)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, turno_id||null, req.user.id, req.user.nombre, turno_letra||null,
+       fecha_cierre||null, total_ventas||0, reporte_articulos||'',
+       area||null, titulo||null, tipo||null, descripcion||null,
+       prioridad||'media', asignado_a||null, asigNombre,
+       JSON.stringify(fotos||[])]);
+    saveDB();
+    res.json({ id });
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Stats del dashboard de tickets
+app.get('/api/tickets/stats', auth(), (req, res) => {
+  try {
+    const rol = req.user.rol;
+    let base = rol === 'cajero' ? `WHERE cajero_id='${req.user.id}'` : '';
+    const total     = (get(`SELECT COUNT(*) as c FROM tickets ${base}`)||{}).c||0;
+    const abiertos  = (get(`SELECT COUNT(*) as c FROM tickets ${base?base+' AND':' WHERE'} estado='abierto'`)||{}).c||0;
+    const revision  = (get(`SELECT COUNT(*) as c FROM tickets ${base?base+' AND':' WHERE'} estado='en_revision'`)||{}).c||0;
+    const resueltos = (get(`SELECT COUNT(*) as c FROM tickets ${base?base+' AND':' WHERE'} estado='resuelto'`)||{}).c||0;
+    res.json({ total, abiertos, revision, resueltos });
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Badge: tickets abiertos sin respuesta (para notificación en menú)
+app.get('/api/tickets/badge', auth(), (req, res) => {
+  try {
+    const rol = req.user.rol;
+    let count;
+    if (rol === 'cajero') {
+      count = (get(`SELECT COUNT(*) as c FROM tickets WHERE cajero_id=? AND estado!='resuelto'`,
+        [req.user.id])||{}).c||0;
+    } else {
+      count = (get(`SELECT COUNT(*) as c FROM tickets WHERE estado='abierto'`)||{}).c||0;
+    }
+    res.json({ count });
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Obtener un ticket con sus mensajes
+app.get('/api/tickets/:id', auth(), (req, res) => {
+  try {
+    const t = get(`SELECT * FROM tickets WHERE id=?`, [req.params.id]);
+    if (!t) return res.status(404).json({error:'Ticket no encontrado'});
+    t.mensajes = all(`SELECT * FROM ticket_mensajes WHERE ticket_id=? ORDER BY id ASC`, [req.params.id]);
+    res.json(t);
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Agregar mensaje a un ticket
+app.post('/api/tickets/:id/mensajes', auth(), (req, res) => {
+  try {
+    const t = get(`SELECT * FROM tickets WHERE id=?`, [req.params.id]);
+    if (!t) return res.status(404).json({error:'Ticket no encontrado'});
+    const { mensaje } = req.body;
+    if (!mensaje?.trim()) return res.status(400).json({error:'Mensaje vacío'});
+    run(`INSERT INTO ticket_mensajes(ticket_id,usuario_id,usuario_nombre,usuario_rol,mensaje)
+      VALUES(?,?,?,?,?)`,
+      [req.params.id, req.user.id, req.user.nombre, req.user.rol, mensaje.trim()]);
+    // Si supervisor/admin responde → pasa a en_revision; si resuelto lo marca
+    if (req.user.rol !== 'cajero' && t.estado === 'abierto') {
+      run(`UPDATE tickets SET estado='en_revision' WHERE id=?`, [req.params.id]);
+    }
+    saveDB();
+    res.json({ok:1});
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Cambiar estado del ticket (supervisor/admin)
+app.put('/api/tickets/:id/estado', auth(['admin','supervisor']), (req, res) => {
+  try {
+    const { estado } = req.body;
+    if (!['abierto','en_revision','resuelto'].includes(estado))
+      return res.status(400).json({error:'Estado inválido'});
+    run(`UPDATE tickets SET estado=? WHERE id=?`, [estado, req.params.id]);
+    saveDB();
+    res.json({ok:1});
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
 // ── BANCOS ──
 app.get('/api/bancos',auth(),(req,res)=>res.json(all(`SELECT * FROM bancos WHERE activo=1 ORDER BY nombre`)));
 app.get('/api/bancos/consolidacion',auth(),(req,res)=>{

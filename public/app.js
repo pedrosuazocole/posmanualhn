@@ -190,6 +190,8 @@ async function showApp() {
   await cargarPermisos();
   buildNav();
   navigateTo('dashboard');
+  // Badge inicial de tickets
+  setTimeout(actualizarBadgeTickets, 1500);
   setupEvents();
 }
 
@@ -210,10 +212,11 @@ const NAV = [
   { view:'bancos',       label:'Bancos',              roles:['admin','supervisor'] },
   { view:'impuestos',    label:'Impuestos',           roles:['admin'] },
   { view:'reports',      label:'Reportes',            roles:['admin','supervisor','cajero'] },
-  { view:'turnos',       label:'🕐 Turnos',            roles:['cajero'] },
+  { view:'turnos',       label:'🕐 Turnos',            roles:['cajero','supervisor','admin'] },
   { view:'users',        label:'Usuarios',            roles:['admin'] },
   { view:'branches',     label:'Sucursales',          roles:['admin'] },
   { view:'whatsapp',     label:'📱 WhatsApp',          roles:['admin'] },
+  { view:'tickets',      label:'🎫 Tickets',            roles:['admin','supervisor','cajero'] },
   { view:'sync',         label:'Sincronización',      roles:['admin'] },
   { view:'config',       label:'Configuración',       roles:['admin'] },
 ];
@@ -271,6 +274,7 @@ function renderView(view) {
     case 'branches':  renderBranches(); break;
     case 'turnos':    renderTurnosCajero(); break;
     case 'whatsapp':  renderWhatsApp(); break;
+    case 'tickets':   renderTickets(); break;
     case 'sync':      loadSync(); break;
     case 'bancos':    renderBancos(); break;
     case 'impuestos': renderImpuestos(); break;
@@ -2947,10 +2951,16 @@ function openPrint(html, title) {
 
 // ─── getRepParams: construye query-string de fechas/sucursal ──────────────
 function getRepParams() {
-  const ini   = (document.getElementById('rep-fecha-ini') || {}).value || todayHN();
-  const fin   = (document.getElementById('rep-fecha-fin') || {}).value || todayHN();
-  const serie = (document.getElementById('rep-serie') || {}).value || '';
-  return `sucursal_id=${USER.sucursal_id}&fecha_ini=${ini}&fecha_fin=${fin}${serie ? '&serie='+encodeURIComponent(serie) : ''}`;
+  const ini    = (document.getElementById('rep-fecha-ini')  || {}).value || todayHN();
+  const fin    = (document.getElementById('rep-fecha-fin')  || {}).value || todayHN();
+  const hIni   = (document.getElementById('rep-hora-ini')   || {}).value || '';
+  const hFin   = (document.getElementById('rep-hora-fin')   || {}).value || '';
+  const serie  = (document.getElementById('rep-serie')      || {}).value || '';
+  let p = `sucursal_id=${USER.sucursal_id}&fecha_ini=${ini}&fecha_fin=${fin}`;
+  if (hIni) p += `&hora_ini=${encodeURIComponent(hIni)}`;
+  if (hFin) p += `&hora_fin=${encodeURIComponent(hFin)}`;
+  if (serie) p += `&serie=${encodeURIComponent(serie)}`;
+  return p;
 }
 
 // ─── renderReports: inicializa fechas del módulo de reportes ─────────────
@@ -3726,7 +3736,188 @@ async function renderTurnosCajero() {
           </button>
         </div>
       `}
+      <!-- REPORTE CONSOLIDADO DEL DÍA -->
+      <div style="margin-top:24px;background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:18px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div style="font-size:14px;font-weight:700;color:#1e3a5f">📊 Reporte Consolidado del Día</div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <input type="date" id="cons-fecha"
+              style="border:1px solid #e2e8f0;border-radius:8px;padding:6px 10px;font-size:13px;outline:none;color:#1e3a5f">
+            <button onclick="generarConsolidado()"
+              style="background:#1e3a5f;color:#fff;border:none;border-radius:8px;padding:7px 16px;font-size:13px;font-weight:700;cursor:pointer">
+              🔍 Ver Consolidado
+            </button>
+          </div>
+        </div>
+        <div id="consolidado-container">
+          <div style="text-align:center;padding:16px;color:#94a3b8;font-size:13px">
+            Selecciona una fecha y presiona Ver Consolidado
+          </div>
+        </div>
+      </div>
+
+      <!-- HISTORIAL DE TURNOS CERRADOS -->
+      <div style="margin-top:24px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div style="font-size:14px;font-weight:700;color:#1e3a5f">📋 Turnos Anteriores</div>
+          <button onclick="cargarHistorialTurnos()" 
+            style="background:#f1f5f9;border:1px solid #e2e8f0;border-radius:8px;padding:5px 14px;font-size:12px;font-weight:600;color:#64748b;cursor:pointer">
+            🔄 Actualizar
+          </button>
+        </div>
+        <div id="historial-turnos-list">
+          <div style="text-align:center;padding:20px;color:#94a3b8;font-size:13px">Cargando...</div>
+        </div>
+      </div>
     </div>`;
+
+  // Inicializar fecha del consolidado con hoy y cargar historial
+  setTimeout(() => {
+    const consF = document.getElementById('cons-fecha');
+    if (consF && !consF.value) consF.value = todayHN();
+    cargarHistorialTurnos();
+  }, 100);
+}
+
+async function cargarHistorialTurnos() {
+  const cont = document.getElementById('historial-turnos-list');
+  if (!cont) return;
+  try {
+    const turnos = await GET('/turnos/mis_turnos', 'limite=10');
+    if (!turnos.length) {
+      cont.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8;font-size:13px">No hay turnos cerrados aún</div>';
+      return;
+    }
+    const numWha = await GET('/whatsapp').catch(()=>[]);
+    cont.innerHTML = turnos.map(t => `
+      <div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,.05)">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+          <div style="width:40px;height:40px;background:#f1f5f9;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#64748b">
+            ${t.turno_letra||'A'}
+          </div>
+          <div style="flex:1">
+            <div style="font-size:14px;font-weight:700;color:#1e293b">
+              Turno ${t.turno_letra||'A'} — ${t.usuario_nombre||'Cajero'}
+            </div>
+            <div style="font-size:11px;color:#94a3b8">
+              Apertura: ${t.fecha_apertura||'—'} &nbsp;|&nbsp; Cierre: ${t.fecha_cierre||'—'}
+            </div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:16px;font-weight:800;color:#1e3a5f">L. ${(t.total_ventas||0).toFixed(2)}</div>
+            <div style="font-size:11px;color:#94a3b8">${t.num_ventas||0} venta${(t.num_ventas||0)!==1?'s':''}</div>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">
+          <div style="background:#f8fafc;border-radius:8px;padding:8px;text-align:center">
+            <div style="font-size:10px;color:#64748b;font-weight:600">EFECTIVO</div>
+            <div style="font-size:14px;font-weight:700;color:#1d4ed8">L.${(t.total_efectivo||0).toFixed(2)}</div>
+          </div>
+          <div style="background:#f8fafc;border-radius:8px;padding:8px;text-align:center">
+            <div style="font-size:10px;color:#64748b;font-weight:600">TARJETA</div>
+            <div style="font-size:14px;font-weight:700;color:#7c3aed">L.${(t.total_tarjeta||0).toFixed(2)}</div>
+          </div>
+          <div style="background:#f8fafc;border-radius:8px;padding:8px;text-align:center">
+            <div style="font-size:10px;color:#64748b;font-weight:600">TRANSF.</div>
+            <div style="font-size:14px;font-weight:700;color:#d97706">L.${(t.total_transferencia||0).toFixed(2)}</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          ${(t.sobrante||0)>0 ? `
+          <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:7px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:12px;color:#92400e;font-weight:700">💰 Sobrante:</span>
+            <div style="text-align:right">
+              <span style="font-size:14px;font-weight:800;color:#d97706">L.${(t.sobrante||0).toFixed(2)}</span>
+              ${t.motivo_sobrante?`<div style="font-size:10px;color:#92400e">${t.motivo_sobrante}</div>`:''}
+            </div>
+          </div>` : ''}
+          <button onclick="imprimirCorte('${t.id}')"
+            style="flex:1;min-width:120px;background:#1e3a5f;color:#fff;border:none;border-radius:8px;padding:9px 12px;font-size:12px;font-weight:700;cursor:pointer">
+            🖨️ Imprimir Corte
+          </button>
+          ${numWha.length ? `
+          <button onclick="enviarCortePDF('${t.id}')"
+            style="flex:1;min-width:120px;background:#25d366;color:#fff;border:none;border-radius:8px;padding:9px 12px;font-size:12px;font-weight:700;cursor:pointer">
+            📱 Enviar WhatsApp
+          </button>` : ''}
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    const cont2 = document.getElementById('historial-turnos-list');
+    if (cont2) cont2.innerHTML = '<div style="text-align:center;padding:16px;color:#dc2626;font-size:13px">Error al cargar historial</div>';
+  }
+}
+
+// Imprimir corte de un turno cerrado en ventana nueva
+async function imprimirCorte(turnoId) {
+  try {
+    const data   = await GET('/turnos/'+turnoId+'/resumen');
+    const {turno, ventas} = data;
+    const arr    = ventas || [];
+    const totV   = arr.reduce((s,v)=>s+(parseFloat(v.total)||0),0);
+    const totE   = arr.reduce((s,v)=>s+(v.forma_pago==='efectivo'?parseFloat(v.total)||0:0),0);
+    const totT   = arr.reduce((s,v)=>s+(v.forma_pago==='tarjeta'?parseFloat(v.total)||0:0),0);
+    const totTr  = arr.reduce((s,v)=>s+(v.forma_pago==='transferencia'?parseFloat(v.total)||0:0),0);
+    const fondo  = parseFloat(turno.fondo_inicial||0);
+    const empresa = USER?.empresa || 'METRIC POS';
+
+    const win = window.open('','_blank','width=420,height=700');
+    if (!win) return alert('Habilita las ventanas emergentes para imprimir');
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <title>Corte de Caja</title>
+    <style>
+      *{margin:0;padding:0;box-sizing:border-box}
+      body{font-family:'Courier New',monospace;font-size:12px;padding:16px;max-width:300px;margin:0 auto}
+      h2{text-align:center;font-size:14px;margin-bottom:2px}
+      h3{text-align:center;font-size:12px;margin-bottom:8px;font-weight:normal}
+      .sep{border-top:1px dashed #000;margin:6px 0}
+      .sep2{border-top:2px solid #000;margin:6px 0}
+      .row{display:flex;justify-content:space-between;margin:3px 0;font-size:12px}
+      .row b{font-weight:700}
+      .center{text-align:center}
+      .total{font-size:14px;font-weight:700}
+      @media print{@page{size:80mm auto;margin:4mm}}
+    </style></head>
+    <body>
+      <h2>${empresa}</h2>
+      <h3>CORTE DE CAJA</h3>
+      <div class="sep2"></div>
+      <div class="row"><span>Turno:</span><b>${turno.turno_letra||'A'}</b></div>
+      <div class="row"><span>Cajero:</span><b>${turno.usuario_nombre||'—'}</b></div>
+      <div class="row"><span>Apertura:</span><span>${(turno.fecha_apertura||'—').substring(0,16)}</span></div>
+      <div class="row"><span>Cierre:</span><span>${(turno.fecha_cierre||'—').substring(0,16)}</span></div>
+      <div class="sep"></div>
+      <div class="row"><span>N° Ventas:</span><b>${arr.length}</b></div>
+      <div class="row total"><span>TOTAL VENTAS:</span><b>L.${totV.toFixed(2)}</b></div>
+      <div class="sep"></div>
+      <div class="row"><span>Efectivo:</span><span>L.${totE.toFixed(2)}</span></div>
+      <div class="row"><span>Tarjeta:</span><span>L.${totT.toFixed(2)}</span></div>
+      <div class="row"><span>Transferencia:</span><span>L.${totTr.toFixed(2)}</span></div>
+      <div class="sep"></div>
+      <div class="row"><span>Fondo Inicial:</span><span>L.${fondo.toFixed(2)}</span></div>
+      <div class="row"><span>Efect. Esperado:</span><b>L.${(fondo+totE).toFixed(2)}</b></div>
+      <div class="row"><span>Efect. Contado:</span><b>L.${(parseFloat(turno.efectivo_contado)||0).toFixed(2)}</b></div>
+      <div class="sep2"></div>
+      ${arr.length ? `
+      <div class="center" style="font-weight:700;margin:6px 0">FACTURAS EMITIDAS</div>
+      <div class="sep"></div>
+      ${arr.map(v=>`
+      <div class="row" style="font-size:11px">
+        <span style="font-family:monospace">${(v.numero_factura||'').slice(-8)}</span>
+        <span>${v.forma_pago==='efectivo'?'EFE':v.forma_pago==='tarjeta'?'TAR':'TRF'}</span>
+        <b>L.${(parseFloat(v.total)||0).toFixed(2)}</b>
+      </div>`).join('')}
+      <div class="sep2"></div>` : ''}
+      ${(parseFloat(turno.sobrante)||0)>0?`
+      <div class="sep"></div>
+      <div class="row" style="color:#92400e"><span>SOBRANTE:</span><b>L.${(parseFloat(turno.sobrante)||0).toFixed(2)}</b></div>
+      ${turno.motivo_sobrante?'<div class="row" style="font-size:10px;color:#64748b"><span>Motivo:</span><span>'+turno.motivo_sobrante+'</span></div>':''}
+      `:''}
+      <div class="center" style="margin-top:8px;font-size:10px;color:#666">Powered by MetricPOS</div>
+      <script>setTimeout(()=>window.print(),400);<\/script>
+    </body></html>`);
+    win.document.close();
+  } catch(e) { alert('Error: '+e.message); }
 }
 
 window._turnoLetra = 'A';
@@ -3759,18 +3950,34 @@ function abrirCerrarTurno(id) {
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9998;display:flex;align-items:center;justify-content:center';
   overlay.innerHTML = `
-    <div style="background:#fff;border-radius:16px;padding:28px 24px;max-width:400px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,.3)">
-      <div style="text-align:center;margin-bottom:20px">
-        <div style="font-size:38px">🔒</div>
-        <div style="font-size:18px;font-weight:800;color:#1e3a5f;margin-top:8px">Finalizar Turno</div>
-        <div style="font-size:13px;color:#64748b;margin-top:4px">Ingresa el efectivo contado en caja</div>
+    <div style="background:#fff;border-radius:16px;padding:24px;max-width:420px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+      <div style="text-align:center;margin-bottom:18px">
+        <div style="font-size:36px">🔒</div>
+        <div style="font-size:17px;font-weight:800;color:#1e3a5f;margin-top:6px">Finalizar Turno</div>
+        <div style="font-size:12px;color:#64748b;margin-top:3px">Completa los datos de cierre</div>
       </div>
-      <div style="margin-bottom:16px">
-        <label style="font-size:12px;font-weight:700;color:#64748b;display:block;margin-bottom:6px">EFECTIVO CONTADO (L.)</label>
+
+      <div style="margin-bottom:14px">
+        <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:5px">EFECTIVO CONTADO (L.)</label>
         <input type="number" id="modal-efectivo-contado" step="0.01" min="0" value="0"
           style="width:100%;border:2px solid #e2e8f0;border-radius:8px;padding:10px 14px;font-size:18px;font-weight:700;outline:none;box-sizing:border-box;text-align:center"
           autofocus>
       </div>
+
+      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:14px;margin-bottom:14px">
+        <div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:10px">💰 Sobrante de Caja</div>
+        <div style="margin-bottom:10px">
+          <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:5px">SOBRANTE (L.) <span style="font-weight:400;color:#94a3b8">— ej: 500.00</span></label>
+          <input type="number" id="modal-sobrante" step="0.01" min="0" value="0"
+            style="width:100%;border:2px solid #fde68a;border-radius:8px;padding:9px 14px;font-size:16px;font-weight:700;outline:none;box-sizing:border-box;text-align:center;background:#fffef5;color:#92400e">
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:5px">MOTIVO DEL SOBRANTE</label>
+          <input type="text" id="modal-motivo-sobrante" placeholder="Ej: Diferencia de cambio, vuelto extra..."
+            style="width:100%;border:2px solid #fde68a;border-radius:8px;padding:9px 14px;font-size:13px;outline:none;box-sizing:border-box;background:#fffef5;color:#78350f">
+        </div>
+      </div>
+
       <div style="display:flex;gap:8px">
         <button onclick="this.closest('div[style*=fixed]').remove()"
           style="flex:1;background:#f1f5f9;border:none;border-radius:10px;padding:12px;font-size:14px;cursor:pointer;color:#64748b;font-weight:600">
@@ -3788,16 +3995,28 @@ function abrirCerrarTurno(id) {
   setTimeout(()=>{ const inp=document.getElementById('modal-efectivo-contado'); if(inp) inp.select(); },100);
 
   document.getElementById('btn-confirmar-cierre').onclick = async () => {
-    const ef = parseFloat(document.getElementById('modal-efectivo-contado').value)||0;
+    const ef       = parseFloat(document.getElementById('modal-efectivo-contado').value)||0;
+    const sobrante = parseFloat(document.getElementById('modal-sobrante').value)||0;
+    const motivo   = (document.getElementById('modal-motivo-sobrante')?.value||'').trim();
     overlay.remove();
-    await cerrarTurnoCajero(id, ef);
+    await cerrarTurnoCajero(id, ef, sobrante, motivo);
   };
 }
 
-async function cerrarTurnoCajero(id, efectivo_contado) {
+async function cerrarTurnoCajero(id, efectivo_contado, sobrante=0, motivo_sobrante='') {
   try {
-    await POST(`/turnos/${id}/cerrar`, { efectivo_contado });
+    const r = await POST(`/turnos/${id}/cerrar`, { efectivo_contado, sobrante, motivo_sobrante });
     showToastMsg('🔒 Turno cerrado correctamente');
+
+    // Obtener datos del turno para el ticket
+    try {
+      const resumen = await GET(`/turnos/${id}/resumen`);
+      const { turno, ventas } = resumen;
+      const totV = (ventas||[]).reduce((s,v)=>s+(parseFloat(v.total)||0),0);
+      // Crear ticket automáticamente con el reporte de artículos
+      await crearTicketDeTurno(id, turno.turno_letra||'A', turno.fecha_cierre||'', totV, turno, ventas||[]);
+    } catch(e) { console.error('Error creando ticket turno:', e.message); }
+
     // Enviar automáticamente los 2 reportes por WhatsApp
     await enviarReportesAlCerrar(id);
     renderTurnosCajero();
@@ -4206,4 +4425,1009 @@ function showToastMsg(msg) {
     font-size:13px;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.2)`;
   document.body.appendChild(t);
   setTimeout(()=>t.remove(),3000);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REPORTE CONSOLIDADO DEL DÍA
+// ═══════════════════════════════════════════════════════════════════════════
+async function generarConsolidado() {
+  const fecha = document.getElementById('cons-fecha')?.value || todayHN();
+  const cont  = document.getElementById('consolidado-container');
+  if (!cont) return;
+
+  cont.innerHTML = '<div style="text-align:center;padding:16px;color:#94a3b8;font-size:13px">⏳ Cargando...</div>';
+
+  try {
+    const { turnos } = await GET('/turnos/consolidado_dia',
+      `sucursal_id=${USER.sucursal_id}&fecha=${fecha}`);
+
+    if (!turnos.length) {
+      cont.innerHTML = `<div style="text-align:center;padding:20px;color:#94a3b8;font-size:13px">
+        No hay turnos registrados para el ${fecha}</div>`;
+      return;
+    }
+
+    // ── Totales globales ──
+    const totV  = turnos.reduce((s,t)=>s+t.tv,0);
+    const totE  = turnos.reduce((s,t)=>s+t.te,0);
+    const totT  = turnos.reduce((s,t)=>s+t.tt,0);
+    const totTr = turnos.reduce((s,t)=>s+t.tr,0);
+    const totNV = turnos.reduce((s,t)=>s+t.nv,0);
+    const totSob= turnos.reduce((s,t)=>s+(parseFloat(t.sobrante)||0),0);
+
+    // ── Artículos consolidados (sumar todos los turnos) ──
+    const artsMap = {};
+    turnos.forEach(t => (t.articulos||[]).forEach(a => {
+      if (!artsMap[a.producto_nombre]) artsMap[a.producto_nombre] = { cod:a.producto_codigo, cat:a.producto_categoria, u:0, tot:0 };
+      artsMap[a.producto_nombre].u   += a.unidades;
+      artsMap[a.producto_nombre].tot += a.total;
+    }));
+    const arts = Object.entries(artsMap).sort((a,b)=>b[1].tot-a[1].tot);
+
+    const numWha = await GET('/whatsapp').catch(()=>[]);
+
+    // ── Render en pantalla ──
+    cont.innerHTML = `
+      <!-- Resumen global -->
+      <div style="background:#1e3a5f;border-radius:10px;padding:14px 18px;margin-bottom:14px;color:#fff">
+        <div style="font-size:12px;font-weight:700;color:#94a3b8;margin-bottom:8px">
+          ${turnos.length} TURNO${turnos.length>1?'S':''} DEL DÍA — ${fecha}
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px">
+          ${[['TOTAL VENTAS','L.'+totV.toFixed(2),'#34d399'],
+             ['EFECTIVO','L.'+totE.toFixed(2),'#60a5fa'],
+             ['TARJETA','L.'+totT.toFixed(2),'#c084fc'],
+             ['TRANSF.','L.'+totTr.toFixed(2),'#fbbf24'],
+             ['N° FACTURAS',totNV,'#94a3b8'],
+             ...(totSob>0?[['SOBRANTE TOTAL','L.'+totSob.toFixed(2),'#fbbf24']]:[])
+            ].map(([l,v,c])=>`
+            <div style="text-align:center">
+              <div style="font-size:10px;color:#94a3b8;font-weight:600">${l}</div>
+              <div style="font-size:18px;font-weight:800;color:${c}">${v}</div>
+            </div>`).join('')}
+        </div>
+      </div>
+
+      <!-- Detalle por turno -->
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px">
+        ${turnos.map(t=>`
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+              <div style="width:34px;height:34px;background:${t.estado==='abierto'?'#059669':'#64748b'};border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;font-weight:800;flex-shrink:0">
+                ${t.turno_letra||'A'}
+              </div>
+              <div style="flex:1">
+                <div style="font-size:13px;font-weight:700;color:#1e293b">
+                  Turno ${t.turno_letra||'A'} — ${t.usuario_nombre||'Cajero'}
+                  <span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;margin-left:6px;
+                    background:${t.estado==='abierto'?'#dcfce7':'#f1f5f9'};
+                    color:${t.estado==='abierto'?'#15803d':'#64748b'}">
+                    ${t.estado==='abierto'?'● EN CURSO':'✓ CERRADO'}
+                  </span>
+                </div>
+                <div style="font-size:11px;color:#94a3b8">${(t.fecha_apertura||'').substring(0,16)} → ${t.fecha_cierre?(t.fecha_cierre||'').substring(0,16):'en curso'}</div>
+              </div>
+              <div style="text-align:right;flex-shrink:0">
+                <div style="font-size:15px;font-weight:800;color:#1e3a5f">L.${t.tv.toFixed(2)}</div>
+                <div style="font-size:11px;color:#94a3b8">${t.nv} fact.</div>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
+              ${[['EFE','#dbeafe',t.te],['TAR','#ede9fe',t.tt],['TRF','#fef9c3',t.tr]].map(([l,bg,v])=>`
+              <div style="background:${bg};border-radius:6px;padding:5px;text-align:center">
+                <div style="font-size:9px;color:#64748b;font-weight:700">${l}</div>
+                <div style="font-size:12px;font-weight:700;color:#1e293b">L.${v.toFixed(2)}</div>
+              </div>`).join('')}
+            </div>
+            ${(parseFloat(t.sobrante)||0)>0?`
+            <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:6px 10px;margin-top:6px;display:flex;justify-content:space-between;align-items:center">
+              <span style="font-size:11px;font-weight:700;color:#92400e">💰 Sobrante:</span>
+              <div style="text-align:right">
+                <span style="font-size:13px;font-weight:800;color:#d97706">L.${(parseFloat(t.sobrante)||0).toFixed(2)}</span>
+                ${t.motivo_sobrante?`<div style="font-size:10px;color:#92400e">${t.motivo_sobrante}</div>`:''}
+              </div>
+            </div>`:''}
+          </div>`).join('')}
+      </div>
+
+      <!-- Top artículos -->
+      <div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;margin-bottom:14px">
+        <div style="font-size:12px;font-weight:700;color:#1e3a5f;margin-bottom:10px">📦 ARTÍCULOS VENDIDOS (TODOS LOS TURNOS)</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead>
+            <tr style="background:#f1f5f9">
+              <th style="padding:6px 8px;text-align:left;color:#64748b;font-weight:700">Artículo</th>
+              <th style="padding:6px 8px;text-align:right;color:#64748b;font-weight:700">Uds.</th>
+              <th style="padding:6px 8px;text-align:right;color:#64748b;font-weight:700">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${arts.map(([nom,d],i)=>`
+            <tr style="border-bottom:1px solid #f1f5f9;background:${i%2?'#f8fafc':'#fff'}">
+              <td style="padding:5px 8px;font-weight:600;color:#1e293b">${nom}</td>
+              <td style="padding:5px 8px;text-align:right;color:#64748b">${d.u}</td>
+              <td style="padding:5px 8px;text-align:right;font-weight:700;color:#059669">L.${d.tot.toFixed(2)}</td>
+            </tr>`).join('')}
+            <tr style="background:#1e3a5f">
+              <td style="padding:6px 8px;color:#fff;font-weight:700">TOTAL</td>
+              <td style="padding:6px 8px;text-align:right;color:#fff;font-weight:700">${arts.reduce((s,[,d])=>s+d.u,0)}</td>
+              <td style="padding:6px 8px;text-align:right;color:#34d399;font-weight:700">L.${totV.toFixed(2)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Botones de acción -->
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button onclick="imprimirConsolidado('${fecha}')"
+          style="flex:1;min-width:140px;background:#1e3a5f;color:#fff;border:none;border-radius:8px;padding:10px;font-size:13px;font-weight:700;cursor:pointer">
+          🖨️ Imprimir Consolidado
+        </button>
+        ${numWha.length ? `
+        <button onclick="enviarConsolidadoWA('${fecha}')"
+          style="flex:1;min-width:140px;background:#25d366;color:#fff;border:none;border-radius:8px;padding:10px;font-size:13px;font-weight:700;cursor:pointer">
+          📱 Enviar por WhatsApp
+        </button>` : ''}
+      </div>`;
+
+    // Guardar datos en memoria para imprimir/enviar sin nueva llamada
+    window._consolidadoData = { fecha, turnos, totV, totE, totT, totTr, totNV, totSob, arts };
+
+  } catch(e) {
+    cont.innerHTML = `<div style="text-align:center;padding:16px;color:#dc2626;font-size:13px">Error: ${e.message}</div>`;
+  }
+}
+
+// ── Imprimir consolidado ────────────────────────────────────────────────────
+function imprimirConsolidado(fecha) {
+  const d = window._consolidadoData;
+  if (!d) return alert('Primero genera el consolidado.');
+  const emp = USER?.empresa || 'METRIC POS';
+  const sep = '================================';
+  const sep2= '--------------------------------';
+
+  // Construir HTML de impresión (ticket 80mm)
+  let html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Consolidado</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'Courier New',monospace;font-size:12px;padding:12px;max-width:300px;margin:0 auto}
+    h2,h3{text-align:center;font-size:13px}
+    .sep{border-top:1px dashed #000;margin:5px 0}
+    .sep2{border-top:2px solid #000;margin:5px 0}
+    .row{display:flex;justify-content:space-between;margin:2px 0}
+    .center{text-align:center}
+    .bold{font-weight:700}
+    @media print{@page{size:80mm auto;margin:3mm}}
+  </style></head><body>`;
+
+  html += `<h2>${emp}</h2>`;
+  html += `<h3>CONSOLIDADO DEL DÍA</h3>`;
+  html += `<div class="center">${d.fecha}</div>`;
+  html += `<div class="sep2"></div>`;
+
+  // Totales globales
+  html += `<div class="row bold"><span>TOTAL VENTAS:</span><span>L.${d.totV.toFixed(2)}</span></div>`;
+  html += `<div class="row"><span>Efectivo:</span><span>L.${d.totE.toFixed(2)}</span></div>`;
+  html += `<div class="row"><span>Tarjeta:</span><span>L.${d.totT.toFixed(2)}</span></div>`;
+  html += `<div class="row"><span>Transferencia:</span><span>L.${d.totTr.toFixed(2)}</span></div>`;
+  html += `<div class="row"><span>N° Facturas:</span><span>${d.totNV}</span></div>`;
+  html += `<div class="sep2"></div>`;
+
+  // Corte por turno
+  d.turnos.forEach(t => {
+    html += `<div class="row bold"><span>TURNO ${t.turno_letra} — ${t.usuario_nombre||'Cajero'}</span></div>`;
+    html += `<div class="row"><span>  Ventas:</span><span>L.${t.tv.toFixed(2)}</span></div>`;
+    html += `<div class="row"><span>  Efectivo:</span><span>L.${t.te.toFixed(2)}</span></div>`;
+    html += `<div class="row"><span>  Tarjeta:</span><span>L.${t.tt.toFixed(2)}</span></div>`;
+    html += `<div class="row"><span>  Transf.:</span><span>L.${t.tr.toFixed(2)}</span></div>`;
+    html += `<div class="row"><span>  Facturas:</span><span>${t.nv}</span></div>`;
+    html += `<div class="row"><span>  Apertura:</span><span>${(t.fecha_apertura||'').substring(11,16)}</span></div>`;
+    html += `<div class="row"><span>  Cierre:</span><span>${t.fecha_cierre?(t.fecha_cierre||'').substring(11,16):'En curso'}</span></div>`;
+    if((parseFloat(t.sobrante)||0)>0){
+      html += `<div class="row" style="color:#d97706"><span>  Sobrante:</span><b>L.${(parseFloat(t.sobrante)||0).toFixed(2)}</b></div>`;
+      if(t.motivo_sobrante) html += `<div class="row" style="font-size:10px;color:#64748b"><span>  Motivo:</span><span>${t.motivo_sobrante}</span></div>`;
+    }
+    html += `<div class="sep"></div>`;
+  });
+
+  // Artículos vendidos
+  html += `<div class="sep2"></div>`;
+  if(d.totSob>0){
+    html += `<div class="row bold" style="color:#d97706"><span>SOBRANTE TOTAL:</span><span>L.${d.totSob.toFixed(2)}</span></div>`;
+    html += `<div class="sep2"></div>`;
+  }
+  html += `<div class="center bold">ARTICULOS VENDIDOS</div>`;
+  html += `<div class="sep"></div>`;
+  d.arts.forEach(([nom,dt]) => {
+    const n = nom.length>18 ? nom.substring(0,18) : nom.padEnd(18);
+    const v = dt.u+'u L.'+dt.tot.toFixed(2);
+    const sp = Math.max(1, 32-n.trim().length-v.length);
+    html += `<div style="font-size:11px">${n.trim()}${' '.repeat(sp)}${v}</div>`;
+  });
+  html += `<div class="sep2"></div>`;
+  html += `<div class="row bold"><span>TOTAL:</span><span>L.${d.totV.toFixed(2)}</span></div>`;
+  html += `<div class="sep2"></div>`;
+  html += `<div class="center" style="font-size:10px;margin-top:6px">Powered by MetricPOS</div>`;
+  html += `<script>setTimeout(()=>window.print(),400);<\/script></body></html>`;
+
+  const win = window.open('','_blank','width=420,height=800');
+  if (!win) return alert('Habilita las ventanas emergentes para imprimir.');
+  win.document.write(html);
+  win.document.close();
+}
+
+// ── Enviar consolidado por WhatsApp ─────────────────────────────────────────
+async function enviarConsolidadoWA(fecha) {
+  const d = window._consolidadoData;
+  if (!d) return alert('Primero genera el consolidado.');
+
+  const numeros = await GET('/whatsapp').catch(()=>[]);
+  if (!numeros.length) return alert('No hay números de WhatsApp configurados.');
+
+  const emp = USER?.empresa || 'METRIC POS';
+  const sep = '━━━━━━━━━━━━━━━━━━━━━━';
+  const pad = (l,r,w=32) => l + ' '.repeat(Math.max(1,w-l.length-r.length)) + r;
+
+  // Texto 1: Corte consolidado
+  const lines1 = [
+    `🏪 *${emp}*`,
+    `📊 *CONSOLIDADO DEL DÍA: ${d.fecha}*`, sep,
+    pad('TOTAL VENTAS:',  'L.'+d.totV.toFixed(2)),
+    pad('Efectivo:',       'L.'+d.totE.toFixed(2)),
+    pad('Tarjeta:',        'L.'+d.totT.toFixed(2)),
+    pad('Transferencia:',  'L.'+d.totTr.toFixed(2)),
+    pad('N° Facturas:',    String(d.totNV)),
+    ...(d.totSob>0?[pad('SOBRANTE TOTAL:','L.'+d.totSob.toFixed(2))]:[]),
+    sep,
+  ];
+  d.turnos.forEach(t => {
+    lines1.push(`*TURNO ${t.turno_letra}* — ${t.usuario_nombre||'Cajero'}`);
+    lines1.push(pad('  Ventas:',   'L.'+t.tv.toFixed(2)));
+    lines1.push(pad('  Efectivo:', 'L.'+t.te.toFixed(2)));
+    lines1.push(pad('  Tarjeta:',  'L.'+t.tt.toFixed(2)));
+    lines1.push(pad('  Facturas:', String(t.nv)));
+    if((parseFloat(t.sobrante)||0)>0){
+      lines1.push(pad('  Sobrante:', 'L.'+(parseFloat(t.sobrante)||0).toFixed(2)));
+      if(t.motivo_sobrante) lines1.push('  Motivo: '+t.motivo_sobrante);
+    }
+    lines1.push('');
+  });
+  lines1.push('_Powered by MetricPOS_');
+  const textoCorte = '```\n' + lines1.join('\n') + '\n```';
+
+  // Texto 2: Artículos del día
+  const lines2 = [
+    `🏪 *${emp}*`,
+    `📦 *ARTÍCULOS VENDIDOS: ${d.fecha}*`, sep,
+    pad('ARTÍCULO','UDS  TOTAL',32), sep,
+  ];
+  d.arts.forEach(([nom,dt]) => {
+    const n = nom.length>18 ? nom.substring(0,18) : nom;
+    lines2.push(pad(n, dt.u+'u L.'+dt.tot.toFixed(2)));
+  });
+  lines2.push(sep);
+  lines2.push(pad('TOTAL GENERAL:', 'L.'+d.totV.toFixed(2)));
+  lines2.push('_Powered by MetricPOS_');
+  const textoArts = '```\n' + lines2.join('\n') + '\n```';
+
+  // Generar botones para cada número
+  const botonesHTML = numeros.map(wa => {
+    const tel = wa.numero.replace(/[^0-9]/g,'');
+    const uc  = 'https://wa.me/'+tel+'?text='+encodeURIComponent(textoCorte);
+    const ua  = 'https://wa.me/'+tel+'?text='+encodeURIComponent(textoArts);
+    return '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;margin-bottom:6px">'
+      +'<div style="font-size:12px;font-weight:700;color:#1e3a5f;margin-bottom:8px">📱 '+wa.nombre+' — <span style="font-family:monospace;color:#64748b">'+wa.numero+'</span></div>'
+      +'<div style="display:flex;gap:8px">'
+      +'<a href="'+uc+'" target="_blank" style="flex:1;display:block;background:#25d366;color:#fff;padding:9px 6px;border-radius:8px;text-decoration:none;font-weight:700;font-size:12px;text-align:center">📊 Corte</a>'
+      +'<a href="'+ua+'" target="_blank" style="flex:1;display:block;background:#2563eb;color:#fff;padding:9px 6px;border-radius:8px;text-decoration:none;font-weight:700;font-size:12px;text-align:center">📦 Artículos</a>'
+      +'</div></div>';
+  }).join('');
+
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:16px;padding:0;max-width:440px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden;max-height:90vh;display:flex;flex-direction:column">
+      <div style="background:#1e3a5f;padding:16px 20px;display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:15px;font-weight:800;color:#fff">📱 Enviar Consolidado</div>
+          <div style="font-size:12px;color:#94a3b8">${d.fecha} · ${d.turnos.length} turno${d.turnos.length>1?'s':''}</div>
+        </div>
+        <button onclick="this.closest('div[style*=fixed]').remove()"
+          style="background:rgba(255,255,255,.15);border:none;border-radius:8px;padding:6px 12px;color:#fff;cursor:pointer;font-size:16px">✕</button>
+      </div>
+      <div style="padding:14px 16px;overflow-y:auto">
+        <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+          Selecciona a quién enviar:
+        </div>
+        ${botonesHTML}
+      </div>
+      <div style="padding:10px 16px;border-top:1px solid #e2e8f0">
+        <button onclick="this.closest('div[style*=fixed]').remove()"
+          style="width:100%;background:#f1f5f9;border:none;border-radius:10px;padding:11px;font-size:13px;cursor:pointer;color:#64748b;font-weight:600">
+          Cerrar
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if(e.target===modal) modal.remove(); });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MÓDULO: TICKETS DE TURNO
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Constantes del módulo de tickets ─────────────────────────────────────────
+const TK_AREAS    = ['Caja','Contabilidad','Cuentas por Cobrar','Proveedores','Tienda','Pista'];
+const TK_TIPOS    = ['No hay en existencia','Producto No Existe','Precio Malo','Factura Pendiente de Cobrar','Factura Pendiente por Pagar'];
+const TK_PRIOR    = { urgente:{label:'🔴 Urgente',color:'#dc2626'}, alta:{label:'🟠 Alta',color:'#ea580c'}, media:{label:'🟡 Media',color:'#d97706'}, baja:{label:'🟢 Baja',color:'#059669'} };
+const TK_ESTADO   = { abierto:{label:'Abierto',color:'#dc2626'}, en_revision:{label:'En Proceso',color:'#d97706'}, resuelto:{label:'Resuelto',color:'#059669'} };
+
+// ── Filtros activos del módulo ────────────────────────────────────────────────
+let _tkFiltros = { estado:'', prioridad:'', area:'' };
+
+async function renderTickets() {
+  const v = document.getElementById('tickets-view');
+  if (!v) return;
+
+  const esCajero = USER?.rol === 'cajero';
+
+  // Cargar stats y tickets en paralelo
+  let stats = { total:0, abiertos:0, revision:0, resueltos:0 };
+  let tickets = [];
+  try { [stats, tickets] = await Promise.all([GET('/tickets/stats'), _cargarTicketsFiltrados()]); }
+  catch(e) { tickets = []; }
+
+  v.innerHTML = `
+    <div class="page">
+      <div class="page-header">
+        <div>
+          <div class="page-title">🎫 Tickets</div>
+          <div class="page-subtitle">Centro de soporte y seguimiento</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn-primary" style="background:#059669" onclick="abrirFormTicket()">
+            + Nuevo Ticket
+          </button>
+          <button class="btn-primary" style="background:#64748b;padding:8px 12px" onclick="renderTickets()">
+            🔄
+          </button>
+        </div>
+      </div>
+
+      <!-- Dashboard de stats -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px">
+        ${[
+          {l:'Total',v:stats.total,c:'#1e3a5f',bg:'#eff6ff',f:''},
+          {l:'Pendientes',v:stats.abiertos,c:'#dc2626',bg:'#fef2f2',f:'abierto'},
+          {l:'En Proceso',v:stats.revision,c:'#d97706',bg:'#fffbeb',f:'en_revision'},
+          {l:'Resueltos',v:stats.resueltos,c:'#059669',bg:'#f0fdf4',f:'resuelto'},
+        ].map(s=>`
+          <div onclick="${s.f?`filtrarTicketsPor('${s.f}')`:''}"
+            style="background:${s.bg};border-radius:12px;padding:14px 16px;
+                   ${s.f?'cursor:pointer;':''}
+                   border:2px solid ${_tkFiltros.estado===s.f&&s.f?s.c:'transparent'}">
+            <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase">${s.l}</div>
+            <div style="font-size:32px;font-weight:900;color:${s.c};line-height:1.1">${s.v}</div>
+          </div>`).join('')}
+      </div>
+
+      <!-- Filtros -->
+      <div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px 16px;margin-bottom:16px">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div style="flex:1;min-width:130px">
+            <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:4px">ESTADO</label>
+            <select id="tk-f-estado" onchange="_tkFiltros.estado=this.value;_recargarListaTickets()"
+              style="width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;background:#fff">
+              <option value="">Todos</option>
+              <option value="abierto">Abierto</option>
+              <option value="en_revision">En Proceso</option>
+              <option value="resuelto">Resuelto</option>
+            </select>
+          </div>
+          <div style="flex:1;min-width:130px">
+            <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:4px">PRIORIDAD</label>
+            <select id="tk-f-prior" onchange="_tkFiltros.prioridad=this.value;_recargarListaTickets()"
+              style="width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;background:#fff">
+              <option value="">Todas</option>
+              <option value="urgente">Urgente</option>
+              <option value="alta">Alta</option>
+              <option value="media">Media</option>
+              <option value="baja">Baja</option>
+            </select>
+          </div>
+          <div style="flex:1;min-width:130px">
+            <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:4px">ÁREA</label>
+            <select id="tk-f-area" onchange="_tkFiltros.area=this.value;_recargarListaTickets()"
+              style="width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:7px 10px;font-size:13px;outline:none;background:#fff">
+              <option value="">Todas</option>
+              ${TK_AREAS.map(a=>`<option value="${a}">${a}</option>`).join('')}
+            </select>
+          </div>
+          <button onclick="_tkFiltros={estado:'',prioridad:'',area:''};renderTickets()"
+            style="background:#f1f5f9;border:1px solid #e2e8f0;border-radius:8px;padding:7px 14px;
+                   font-size:12px;font-weight:600;color:#64748b;cursor:pointer;white-space:nowrap">
+            ✕ Limpiar
+          </button>
+        </div>
+      </div>
+
+      <!-- Lista de tickets -->
+      <div id="tk-lista">
+        ${_renderListaTickets(tickets)}
+      </div>
+    </div>`;
+
+  // Restaurar valores de filtros activos
+  const sf=document.getElementById('tk-f-estado'); if(sf&&_tkFiltros.estado) sf.value=_tkFiltros.estado;
+  const pf=document.getElementById('tk-f-prior');  if(pf&&_tkFiltros.prioridad) pf.value=_tkFiltros.prioridad;
+  const af=document.getElementById('tk-f-area');   if(af&&_tkFiltros.area) af.value=_tkFiltros.area;
+}
+
+async function _cargarTicketsFiltrados() {
+  const p = Object.entries(_tkFiltros).filter(([,v])=>v).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&');
+  return await GET('/tickets', p);
+}
+
+function _renderListaTickets(tickets) {
+  if (!tickets.length) return `
+    <div style="text-align:center;padding:40px 24px;color:#94a3b8">
+      <div style="font-size:40px;margin-bottom:10px">🎫</div>
+      <div style="font-size:15px;font-weight:600">No hay tickets que mostrar</div>
+      <div style="font-size:12px;margin-top:4px">Prueba cambiando los filtros o crea un nuevo ticket</div>
+    </div>`;
+  return `<div style="display:flex;flex-direction:column;gap:8px">
+    ${tickets.map(t => {
+      const pr = TK_PRIOR[t.prioridad] || {label:'Media',color:'#64748b'};
+      const es = TK_ESTADO[t.estado]   || {label:t.estado,color:'#64748b'};
+      return `
+        <div onclick="abrirTicket('${t.id}')"
+          style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px 16px;
+                 cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.05);border-left:4px solid ${pr.color}"
+          onmouseover="this.style.boxShadow='0 4px 14px rgba(0,0,0,.10)'"
+          onmouseout="this.style.boxShadow='0 1px 3px rgba(0,0,0,.05)'">
+          <div style="display:flex;align-items:flex-start;gap:12px">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px">
+                <span style="font-size:13px;font-weight:800;color:#1e293b">
+                  ${t.titulo || 'Turno '+( t.turno_letra||'A')+' — '+(t.cajero_nombre||'')}
+                </span>
+                <span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;
+                  background:${es.color}18;color:${es.color}">${es.label}</span>
+                <span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;
+                  background:${pr.color}18;color:${pr.color}">${pr.label}</span>
+              </div>
+              <div style="display:flex;gap:10px;font-size:11px;color:#94a3b8;flex-wrap:wrap">
+                ${t.area?`<span>📍 ${t.area}</span>`:''}
+                ${t.tipo?`<span>🏷️ ${t.tipo}</span>`:''}
+                <span>👤 ${t.cajero_nombre||'—'}</span>
+                ${t.asignado_nombre?`<span>→ ${t.asignado_nombre}</span>`:''}
+                <span>🕐 ${(t.creado||'').substring(0,16)}</span>
+              </div>
+              ${t.descripcion?`<div style="margin-top:5px;font-size:12px;color:#64748b">
+                ${t.descripcion.substring(0,100)}${t.descripcion.length>100?'...':''}</div>`:''}
+              ${t.ultimo_mensaje?`
+              <div style="margin-top:6px;background:#f8fafc;border-radius:6px;padding:5px 9px;
+                          font-size:11px;color:#64748b;border-left:2px solid #e2e8f0">
+                <b style="color:#1e293b">${t.ultimo_mensaje.usuario_nombre}:</b>
+                ${t.ultimo_mensaje.mensaje.substring(0,70)}${t.ultimo_mensaje.mensaje.length>70?'...':''}
+              </div>`:''}
+            </div>
+            <div style="text-align:right;flex-shrink:0">
+              <div style="font-size:11px;color:#94a3b8">${t.total_mensajes} msg</div>
+              ${(JSON.parse(t.fotos||'[]')).length?`<div style="font-size:10px;color:#94a3b8">📷 ${JSON.parse(t.fotos||'[]').length}</div>`:''}
+              <div style="font-size:18px;color:#94a3b8;margin-top:4px">›</div>
+            </div>
+          </div>
+        </div>`;
+    }).join('')}
+  </div>`;
+}
+
+async function _recargarListaTickets() {
+  const lista = document.getElementById('tk-lista');
+  if (!lista) return;
+  try {
+    const tickets = await _cargarTicketsFiltrados();
+    lista.innerHTML = _renderListaTickets(tickets);
+  } catch(e) {}
+}
+
+function filtrarTicketsPor(estado) {
+  _tkFiltros.estado = _tkFiltros.estado === estado ? '' : estado;
+  renderTickets();
+}
+
+// ── Detalle de un ticket ──────────────────────────────────────────────────────
+async function abrirTicket(id) {
+  let ticket;
+  try { ticket = await GET('/tickets/'+id); } catch(e) { return alert('Error: '+e.message); }
+
+  const esCajero  = USER?.rol === 'cajero';
+  const esSuperAdmin = USER?.rol === 'admin' || USER?.rol === 'supervisor';
+  const estadoColor = { abierto:'#dc2626', en_revision:'#d97706', resuelto:'#059669' };
+  const estadoLabel = { abierto:'🔴 Pendiente', en_revision:'🟡 En Proceso', resuelto:'🟢 Resuelto' };
+
+  const modal = document.createElement('div');
+  modal.id = 'ticket-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:stretch;justify-content:flex-end';
+
+  modal.innerHTML = `
+    <div style="background:#fff;width:100%;max-width:520px;display:flex;flex-direction:column;
+                box-shadow:-8px 0 40px rgba(0,0,0,.15);overflow:hidden">
+
+      <!-- Header -->
+      <div style="background:#1e3a5f;padding:16px 20px;display:flex;align-items:center;gap:12px;flex-shrink:0">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:15px;font-weight:800;color:#fff">
+            ${ticket.titulo || ('Turno '+(ticket.turno_letra||'A')+' — '+(ticket.cajero_nombre||'Cajero'))}
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+            ${ticket.area?`<span style="font-size:10px;background:rgba(255,255,255,.15);color:#e2e8f0;padding:2px 8px;border-radius:8px">📍 ${ticket.area}</span>`:''}
+            ${ticket.tipo?`<span style="font-size:10px;background:rgba(255,255,255,.15);color:#e2e8f0;padding:2px 8px;border-radius:8px">🏷️ ${ticket.tipo}</span>`:''}
+            <span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:8px;
+              background:${(TK_PRIOR[ticket.prioridad]||{color:'#64748b'}).color}33;
+              color:${(TK_PRIOR[ticket.prioridad]||{color:'#fff'}).color}">
+              ${(TK_PRIOR[ticket.prioridad]||{label:'Media'}).label}
+            </span>
+            <span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:8px;
+              background:${(TK_ESTADO[ticket.estado]||{color:'#64748b'}).color}33;
+              color:${(TK_ESTADO[ticket.estado]||{color:'#fff'}).color}">
+              ${(TK_ESTADO[ticket.estado]||{label:ticket.estado}).label}
+            </span>
+          </div>
+        </div>
+        <button onclick="document.getElementById('ticket-modal').remove();renderTickets()"
+          style="background:rgba(255,255,255,.15);border:none;border-radius:8px;
+                 padding:7px 12px;color:#fff;cursor:pointer;font-size:16px;flex-shrink:0">✕</button>
+      </div>
+
+      <!-- Info del ticket -->
+      <div style="background:#f8fafc;border-bottom:1px solid #e2e8f0;padding:12px 18px;flex-shrink:0">
+        <div style="display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:#64748b;margin-bottom:${ticket.descripcion?'8px':'0'}">
+          <span>👤 <b>${ticket.cajero_nombre||'—'}</b></span>
+          ${ticket.asignado_nombre?`<span>→ Asignado a <b>${ticket.asignado_nombre}</b></span>`:''}
+          <span>🕐 ${(ticket.creado||'').substring(0,16)}</span>
+          ${(ticket.total_ventas||0)>0?`<span>💰 L.${(ticket.total_ventas||0).toFixed(2)}</span>`:''}
+        </div>
+        ${ticket.descripcion?`<div style="font-size:13px;color:#1e293b;background:#fff;border-radius:8px;padding:10px 12px;border:1px solid #e2e8f0">${ticket.descripcion.split('\n').join('<br>')}</div>`:''}
+      </div>
+
+      <!-- Fotos de evidencia -->
+      ${(()=>{
+        const fotos = JSON.parse(ticket.fotos||'[]');
+        return fotos.length ? `
+        <div style="border-bottom:1px solid #e2e8f0;padding:12px 18px;flex-shrink:0">
+          <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:8px">📷 EVIDENCIAS (${fotos.length})</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            ${fotos.map((src,i)=>`
+              <img src="${src}" onclick="tkVerFoto('${i}',${JSON.stringify(fotos).replace(/"/g,"'")})"
+                style="width:60px;height:60px;object-fit:cover;border-radius:8px;cursor:pointer;
+                       border:1px solid #e2e8f0" title="Click para ampliar">`).join('')}
+          </div>
+        </div>` : '';
+      })()}
+
+      <!-- Reporte artículos colapsable -->
+      ${ticket.reporte_articulos ? `
+      <div style="border-bottom:1px solid #e2e8f0;flex-shrink:0">
+        <button onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'"
+          style="width:100%;background:#eff6ff;border:none;padding:10px 18px;font-size:12px;
+                 font-weight:700;color:#2563eb;cursor:pointer;text-align:left">
+          📦 Ver Artículos Vendidos ▾
+        </button>
+        <div style="display:none;padding:12px 18px;background:#f8fafc;max-height:180px;overflow-y:auto">
+          <pre style="font-family:monospace;font-size:11px;color:#1e3a5f;white-space:pre-wrap;margin:0">${ticket.reporte_articulos}</pre>
+        </div>
+      </div>` : ''}
+
+      <!-- Mensajes -->
+      <div id="ticket-msgs" style="flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:10px">
+        ${ticket.mensajes.length === 0 ? `
+          <div style="text-align:center;padding:24px;color:#94a3b8;font-size:13px">
+            Sin respuestas aún. Sé el primero en responder.
+          </div>` :
+          ticket.mensajes.map(m => {
+            const esMio = m.usuario_id === USER?.id;
+            const esAdmin = m.usuario_rol === 'admin' || m.usuario_rol === 'supervisor';
+            return `
+              <div style="display:flex;flex-direction:column;align-items:${esMio?'flex-end':'flex-start'}">
+                <div style="font-size:10px;color:#94a3b8;margin-bottom:3px;padding:0 4px">
+                  ${m.usuario_nombre} · ${(m.creado||'').substring(0,16)}
+                </div>
+                <div style="max-width:85%;padding:10px 14px;border-radius:${esMio?'14px 14px 4px 14px':'14px 14px 14px 4px'};
+                  background:${esMio?'#1e3a5f':esAdmin?'#f0fdf4':'#f1f5f9'};
+                  color:${esMio?'#fff':esAdmin?'#15803d':'#1e293b'};
+                  font-size:13px;line-height:1.5;border:${esAdmin&&!esMio?'1px solid #d1fae5':'none'}">
+                  ${m.mensaje.replace(/\n/g,'<br>')}
+                </div>
+              </div>`;
+          }).join('')
+        }
+      </div>
+
+      <!-- Acciones supervisor (cambio de estado) -->
+      ${esSuperAdmin ? `
+      <div style="padding:10px 18px;border-top:1px solid #e2e8f0;display:flex;gap:6px;flex-shrink:0;background:#f8fafc">
+        <button onclick="cambiarEstadoTicket('${ticket.id}','abierto')"
+          style="flex:1;background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:7px;
+                 font-size:11px;font-weight:700;color:#dc2626;cursor:pointer">
+          🔴 Pendiente
+        </button>
+        <button onclick="cambiarEstadoTicket('${ticket.id}','en_revision')"
+          style="flex:1;background:#fef9c3;border:1px solid #fde68a;border-radius:8px;padding:7px;
+                 font-size:11px;font-weight:700;color:#92400e;cursor:pointer">
+          🟡 En Proceso
+        </button>
+        <button onclick="cambiarEstadoTicket('${ticket.id}','resuelto')"
+          style="flex:1;background:#dcfce7;border:1px solid #86efac;border-radius:8px;padding:7px;
+                 font-size:11px;font-weight:700;color:#15803d;cursor:pointer">
+          🟢 Resuelto
+        </button>
+      </div>` : ''}
+
+      <!-- Input de respuesta -->
+      ${ticket.estado !== 'resuelto' ? `
+      <div style="padding:14px 18px;border-top:1px solid #e2e8f0;background:#fff;flex-shrink:0">
+        <div style="display:flex;gap:8px;align-items:flex-end">
+          <textarea id="ticket-reply-txt" placeholder="Escribe tu respuesta..."
+            rows="2" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();enviarMensajeTicket('${ticket.id}')}"
+            style="flex:1;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;
+                   font-size:13px;resize:none;outline:none;font-family:inherit"></textarea>
+          <button onclick="enviarMensajeTicket('${ticket.id}')"
+            style="background:#059669;color:#fff;border:none;border-radius:10px;
+                   padding:10px 16px;font-size:20px;cursor:pointer;flex-shrink:0">➤</button>
+        </div>
+        <div style="font-size:10px;color:#94a3b8;margin-top:5px">Enter para enviar · Shift+Enter para nueva línea</div>
+      </div>` : `
+      <div style="padding:14px 18px;background:#f0fdf4;border-top:1px solid #d1fae5;text-align:center;
+                  font-size:13px;font-weight:600;color:#15803d;flex-shrink:0">
+        ✅ Ticket resuelto — Cerrado
+      </div>`}
+    </div>`;
+
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if(e.target===modal) { modal.remove(); renderTickets(); } });
+
+  // Scroll al final de los mensajes
+  setTimeout(() => {
+    const msgs = document.getElementById('ticket-msgs');
+    if (msgs) msgs.scrollTop = msgs.scrollHeight;
+  }, 100);
+}
+
+// ── Enviar mensaje ────────────────────────────────────────────────────────────
+async function enviarMensajeTicket(ticketId) {
+  const txt = document.getElementById('ticket-reply-txt');
+  if (!txt || !txt.value.trim()) return;
+  const msg = txt.value.trim();
+  txt.value = '';
+  try {
+    await POST('/tickets/'+ticketId+'/mensajes', { mensaje: msg });
+    // Recargar el ticket abierto
+    document.getElementById('ticket-modal')?.remove();
+    await abrirTicket(ticketId);
+    // Actualizar badge
+    actualizarBadgeTickets();
+  } catch(e) { alert('Error: '+e.message); txt.value = msg; }
+}
+
+// ── Cambiar estado ────────────────────────────────────────────────────────────
+async function cambiarEstadoTicket(ticketId, estado) {
+  try {
+    await fetch(`/api/tickets/${ticketId}/estado`, {
+      method:'PUT', headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},
+      body: JSON.stringify({estado})
+    });
+    document.getElementById('ticket-modal')?.remove();
+    await abrirTicket(ticketId);
+    actualizarBadgeTickets();
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+// ── Crear ticket al cerrar turno ──────────────────────────────────────────────
+async function crearTicketDeTurno(turnoId, turnoLetra, fechaCierre, totalVentas, turnoData, ventas) {
+  try {
+    // Construir reporte de artículos sumando items de cada venta
+    const articulos = {};
+    for (const v of (ventas||[])) {
+      try {
+        const items = await GET('/ventas/'+v.id+'/items');
+        for (const item of (items||[])) {
+          const k = (item.producto_nombre||'Artículo').trim();
+          if (!articulos[k]) articulos[k] = { u:0, tot:0 };
+          const cant = parseInt(item.cantidad)||1;
+          // Usar subtotal guardado en BD — más confiable que precio_unit*cant
+          const sub  = parseFloat(item.subtotal)||( cant * parseFloat(item.precio_unit||0) );
+          articulos[k].u   += cant;
+          articulos[k].tot += sub;
+        }
+      } catch(e) { console.error('items error venta '+v.id, e.message); }
+    }
+
+    const sep = '================================';
+    const pad = (l,r,w=32) => l + ' '.repeat(Math.max(1, w-l.length-r.length)) + r;
+    const emp = USER?.empresa || 'METRIC POS';
+
+    let reporte = emp + '\nARTICULOS VENDIDOS — Turno ' + turnoLetra + '\n' + sep + '\n';
+    reporte += pad('ARTICULO', 'UDS  TOTAL', 32) + '\n' + sep.replace(/=/g,'-') + '\n';
+
+    const sorted = Object.entries(articulos).sort((a,b) => b[1].tot - a[1].tot);
+    sorted.forEach(([nom, d]) => {
+      const n = nom.length > 18 ? nom.substring(0,18) : nom;
+      reporte += pad(n, d.u + 'u L.' + d.tot.toFixed(2)) + '\n';
+    });
+
+    if (!sorted.length) reporte += '  (Sin artículos registrados)\n';
+
+    reporte += sep + '\n' + pad('TOTAL VENTAS:', 'L.' + totalVentas.toFixed(2));
+
+    await POST('/tickets', {
+      turno_id:         turnoId,
+      turno_letra:      turnoLetra,
+      fecha_cierre:     fechaCierre,
+      total_ventas:     totalVentas,
+      reporte_articulos: reporte
+    });
+    actualizarBadgeTickets();
+    console.log('✅ Ticket de turno creado con artículos:', sorted.length);
+  } catch(e) { console.error('Error creando ticket de turno:', e.message); }
+}
+
+// ── Badge de tickets en el menú ───────────────────────────────────────────────
+async function actualizarBadgeTickets() {
+  try {
+    const { count } = await GET('/tickets/badge');
+    // Buscar el ítem de Tickets en el NAV y agregar badge
+    document.querySelectorAll('.nav-item').forEach(btn => {
+      if (btn.dataset.view === 'tickets') {
+        const badge = btn.querySelector('.ticket-badge');
+        if (count > 0) {
+          if (badge) { badge.textContent = count; }
+          else {
+            const b = document.createElement('span');
+            b.className = 'ticket-badge';
+            b.textContent = count;
+            b.style.cssText = 'background:#dc2626;color:#fff;border-radius:10px;padding:1px 7px;font-size:10px;font-weight:800;margin-left:6px';
+            btn.appendChild(b);
+          }
+        } else if (badge) { badge.remove(); }
+      }
+    });
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FORMULARIO NUEVO TICKET
+// ═══════════════════════════════════════════════════════════════════════════
+async function abrirFormTicket() {
+  // Cargar usuarios para el campo "Asignar a"
+  let usuarios = [];
+  try { usuarios = await GET('/usuarios'); } catch(e) {}
+
+  const modal = document.createElement('div');
+  modal.id = 'tk-form-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+
+  modal.innerHTML = `
+    <div style="background:#fff;width:100%;max-width:580px;border-radius:18px 18px 0 0;
+                max-height:94vh;display:flex;flex-direction:column;box-shadow:0 -8px 40px rgba(0,0,0,.18)">
+
+      <!-- Header -->
+      <div style="background:#1e3a5f;padding:16px 20px;border-radius:18px 18px 0 0;
+                  display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
+        <div style="font-size:16px;font-weight:800;color:#fff">🎫 Nuevo Ticket</div>
+        <button onclick="document.getElementById('tk-form-modal').remove()"
+          style="background:rgba(255,255,255,.15);border:none;border-radius:8px;
+                 padding:6px 12px;color:#fff;cursor:pointer;font-size:16px">✕</button>
+      </div>
+
+      <!-- Formulario -->
+      <div style="flex:1;overflow-y:auto;padding:20px">
+        <div style="display:flex;flex-direction:column;gap:14px">
+
+          <!-- Área -->
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:5px">
+              ÁREA *
+            </label>
+            <select id="tk-area"
+              style="width:100%;border:1.5px solid #e2e8f0;border-radius:8px;padding:10px 12px;
+                     font-size:14px;outline:none;background:#fff;box-sizing:border-box">
+              <option value="">— Selecciona un área —</option>
+              ${TK_AREAS.map(a=>`<option value="${a}">${a}</option>`).join('')}
+            </select>
+          </div>
+
+          <!-- Título -->
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:5px">
+              TÍTULO DEL TICKET *
+            </label>
+            <input type="text" id="tk-titulo" placeholder="Ej: Falta de cambio en caja"
+              style="width:100%;border:1.5px solid #e2e8f0;border-radius:8px;padding:10px 12px;
+                     font-size:14px;outline:none;box-sizing:border-box">
+          </div>
+
+          <!-- Tipo -->
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:5px">
+              TIPO DE TICKET *
+            </label>
+            <select id="tk-tipo"
+              style="width:100%;border:1.5px solid #e2e8f0;border-radius:8px;padding:10px 12px;
+                     font-size:14px;outline:none;background:#fff;box-sizing:border-box">
+              <option value="">— Selecciona el tipo —</option>
+              ${TK_TIPOS.map(t=>`<option value="${t}">${t}</option>`).join('')}
+            </select>
+          </div>
+
+          <!-- Descripción -->
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:5px">
+              DESCRIPCIÓN DETALLADA *
+            </label>
+            <textarea id="tk-desc" rows="4" placeholder="Describe el problema con detalle..."
+              style="width:100%;border:1.5px solid #e2e8f0;border-radius:8px;padding:10px 12px;
+                     font-size:14px;outline:none;resize:none;box-sizing:border-box;font-family:inherit"></textarea>
+          </div>
+
+          <!-- Prioridad -->
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:8px">
+              PRIORIDAD *
+            </label>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+              ${Object.entries(TK_PRIOR).map(([k,p])=>`
+                <label style="cursor:pointer">
+                  <input type="radio" name="tk-prior" value="${k}"
+                    ${k==='media'?'checked':''} style="display:none"
+                    onchange="document.querySelectorAll('.tk-prior-btn').forEach(b=>b.style.background='#f8fafc');this.nextElementSibling.style.background='${p.color}18'">
+                  <div class="tk-prior-btn" style="text-align:center;padding:8px 6px;border-radius:8px;
+                    border:1.5px solid ${p.color}40;font-size:11px;font-weight:700;color:${p.color};
+                    background:${k==='media'?p.color+'18':'#f8fafc'}">
+                    ${p.label}
+                  </div>
+                </label>`).join('')}
+            </div>
+          </div>
+
+          <!-- Asignar a -->
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:5px">
+              ASIGNAR A
+            </label>
+            <select id="tk-asignado"
+              style="width:100%;border:1.5px solid #e2e8f0;border-radius:8px;padding:10px 12px;
+                     font-size:14px;outline:none;background:#fff;box-sizing:border-box">
+              <option value="">— Sin asignar —</option>
+              ${usuarios.map(u=>`<option value="${u.id}">${u.nombre} (${u.rol})</option>`).join('')}
+            </select>
+          </div>
+
+          <!-- Fotos de evidencia -->
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:5px">
+              FOTOS DE EVIDENCIA <span style="font-weight:400">(máx. 5)</span>
+            </label>
+            <div id="tk-fotos-preview"
+              style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;min-height:8px"></div>
+            <label id="tk-foto-btn"
+              style="display:inline-flex;align-items:center;gap:6px;background:#f1f5f9;
+                     border:1.5px dashed #cbd5e1;border-radius:8px;padding:10px 16px;
+                     cursor:pointer;font-size:13px;color:#64748b;font-weight:600">
+              📷 Agregar foto
+              <input type="file" id="tk-foto-input" accept="image/*" multiple
+                style="display:none" onchange="tkAgregarFotos(this)">
+            </label>
+            <div style="font-size:10px;color:#94a3b8;margin-top:4px">JPG, PNG — máximo 5 fotos</div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Botones -->
+      <div style="padding:14px 20px;border-top:1px solid #e2e8f0;display:flex;gap:8px;flex-shrink:0">
+        <button onclick="document.getElementById('tk-form-modal').remove()"
+          style="flex:1;background:#f1f5f9;border:none;border-radius:10px;padding:12px;
+                 font-size:14px;cursor:pointer;color:#64748b;font-weight:600">
+          Cancelar
+        </button>
+        <button onclick="guardarNuevoTicket()"
+          style="flex:2;background:#1e3a5f;border:none;border-radius:10px;padding:12px;
+                 font-size:14px;cursor:pointer;color:#fff;font-weight:800">
+          🎫 Crear Ticket
+        </button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(modal);
+  // Cerrar al click en overlay
+  modal.addEventListener('click', e => { if(e.target===modal) modal.remove(); });
+}
+
+// ── Manejar fotos ─────────────────────────────────────────────────────────────
+window._tkFotos = [];
+
+function tkAgregarFotos(input) {
+  const files = Array.from(input.files);
+  const restantes = 5 - window._tkFotos.length;
+  if (restantes <= 0) { alert('Ya tienes 5 fotos. Elimina alguna para agregar.'); return; }
+  const toAdd = files.slice(0, restantes);
+  toAdd.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      window._tkFotos.push(e.target.result);
+      _renderFotosPreview();
+    };
+    reader.readAsDataURL(file);
+  });
+  input.value = '';
+}
+
+function _renderFotosPreview() {
+  const cont = document.getElementById('tk-fotos-preview');
+  if (!cont) return;
+  cont.innerHTML = window._tkFotos.map((src, i) => `
+    <div style="position:relative;width:70px;height:70px">
+      <img src="${src}" style="width:70px;height:70px;object-fit:cover;border-radius:8px;border:1px solid #e2e8f0">
+      <button onclick="window._tkFotos.splice(${i},1);_renderFotosPreview()"
+        style="position:absolute;top:-6px;right:-6px;background:#dc2626;color:#fff;border:none;
+               border-radius:50%;width:20px;height:20px;font-size:12px;cursor:pointer;
+               display:flex;align-items:center;justify-content:center;font-weight:700">✕</button>
+    </div>`).join('');
+  // Ocultar botón si llegó a 5
+  const btn = document.getElementById('tk-foto-btn');
+  if (btn) btn.style.display = window._tkFotos.length >= 5 ? 'none' : 'inline-flex';
+}
+
+// ── Guardar nuevo ticket ──────────────────────────────────────────────────────
+async function guardarNuevoTicket() {
+  window._tkFotos = window._tkFotos || [];
+
+  const area      = document.getElementById('tk-area')?.value;
+  const titulo    = document.getElementById('tk-titulo')?.value.trim();
+  const tipo      = document.getElementById('tk-tipo')?.value;
+  const desc      = document.getElementById('tk-desc')?.value.trim();
+  const prioridad = document.querySelector('input[name="tk-prior"]:checked')?.value || 'media';
+  const asignado  = document.getElementById('tk-asignado')?.value;
+
+  if (!area)   return alert('Selecciona un área.');
+  if (!titulo) return alert('Ingresa el título del ticket.');
+  if (!tipo)   return alert('Selecciona el tipo de ticket.');
+  if (!desc)   return alert('Ingresa una descripción detallada.');
+
+  try {
+    const r = await POST('/tickets', {
+      area, titulo, tipo, descripcion: desc,
+      prioridad, asignado_a: asignado || null,
+      fotos: window._tkFotos
+    });
+    window._tkFotos = [];
+    document.getElementById('tk-form-modal')?.remove();
+    showToastMsg('🎫 Ticket creado correctamente');
+    actualizarBadgeTickets();
+    renderTickets();
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+// ── Ver foto ampliada ─────────────────────────────────────────────────────────
+function tkVerFoto(idx, fotos) {
+  const arr = typeof fotos === 'string' ? JSON.parse(fotos) : fotos;
+  let cur = parseInt(idx);
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:19999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px';
+
+  const render = () => {
+    modal.innerHTML = `
+      <img src="${arr[cur]}" style="max-width:90vw;max-height:80vh;border-radius:8px;object-fit:contain">
+      <div style="display:flex;gap:12px;align-items:center">
+        ${arr.length>1?`<button onclick="event.stopPropagation();tkVerFoto(${(cur-1+arr.length)%arr.length},${JSON.stringify(arr).replace(/"/g,"'")})" style="background:rgba(255,255,255,.2);border:none;border-radius:8px;padding:8px 16px;color:#fff;cursor:pointer;font-size:18px">‹</button>`:''}
+        <span style="color:#94a3b8;font-size:12px">${cur+1} / ${arr.length}</span>
+        ${arr.length>1?`<button onclick="event.stopPropagation();tkVerFoto(${(cur+1)%arr.length},${JSON.stringify(arr).replace(/"/g,"'")})" style="background:rgba(255,255,255,.2);border:none;border-radius:8px;padding:8px 16px;color:#fff;cursor:pointer;font-size:18px">›</button>`:''}
+        <button onclick="this.closest('div[style*=fixed]').remove()" style="background:#dc2626;border:none;border-radius:8px;padding:8px 16px;color:#fff;cursor:pointer">✕ Cerrar</button>
+      </div>`;
+  };
+  render();
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if(e.target===modal) modal.remove(); });
 }
