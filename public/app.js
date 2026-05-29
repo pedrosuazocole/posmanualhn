@@ -5029,16 +5029,24 @@ async function abrirTicket(id) {
           ticket.mensajes.map(m => {
             const esMio = m.usuario_id === USER?.id;
             const esAdmin = m.usuario_rol === 'admin' || m.usuario_rol === 'supervisor';
+            const adjs = JSON.parse(m.adjuntos||'[]');
             return `
               <div style="display:flex;flex-direction:column;align-items:${esMio?'flex-end':'flex-start'}">
                 <div style="font-size:10px;color:#94a3b8;margin-bottom:3px;padding:0 4px">
                   ${m.usuario_nombre} · ${(m.creado||'').substring(0,16)}
                 </div>
-                <div style="max-width:85%;padding:10px 14px;border-radius:${esMio?'14px 14px 4px 14px':'14px 14px 14px 4px'};
-                  background:${esMio?'#1e3a5f':esAdmin?'#f0fdf4':'#f1f5f9'};
-                  color:${esMio?'#fff':esAdmin?'#15803d':'#1e293b'};
-                  font-size:13px;line-height:1.5;border:${esAdmin&&!esMio?'1px solid #d1fae5':'none'}">
-                  ${m.mensaje.replace(/\n/g,'<br>')}
+                <div style="max-width:88%">
+                  ${m.mensaje.trim() ? `
+                  <div style="padding:10px 14px;border-radius:${esMio?'14px 14px 4px 14px':'14px 14px 14px 4px'};
+                    background:${esMio?'#1e3a5f':esAdmin?'#f0fdf4':'#f1f5f9'};
+                    color:${esMio?'#fff':esAdmin?'#15803d':'#1e293b'};
+                    font-size:13px;line-height:1.5;border:${esAdmin&&!esMio?'1px solid #d1fae5':'none'}">
+                    ${m.mensaje.split('\n').join('<br>')}
+                  </div>` : ''}
+                  ${adjs.length ? `
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:${m.mensaje.trim()?'5px':'0'}">
+                    ${adjs.map(a => _tkRenderAdjunto(a, esMio)).join('')}
+                  </div>` : ''}
                 </div>
               </div>`;
           }).join('')
@@ -5067,17 +5075,32 @@ async function abrirTicket(id) {
 
       <!-- Input de respuesta -->
       ${ticket.estado !== 'resuelto' ? `
-      <div style="padding:14px 18px;border-top:1px solid #e2e8f0;background:#fff;flex-shrink:0">
-        <div style="display:flex;gap:8px;align-items:flex-end">
-          <textarea id="ticket-reply-txt" placeholder="Escribe tu respuesta..."
+      <div style="padding:10px 14px;border-top:1px solid #e2e8f0;background:#fff;flex-shrink:0">
+        <!-- Preview adjuntos pendientes -->
+        <div id="tk-adj-preview" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px"></div>
+        <!-- Barra de acción -->
+        <div style="display:flex;gap:6px;align-items:flex-end">
+          <!-- Botón adjuntar -->
+          <label title="Adjuntar archivo"
+            style="flex-shrink:0;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:10px;
+                   padding:9px 11px;cursor:pointer;font-size:16px;display:flex;align-items:center">
+            📎
+            <input type="file" id="tk-adj-input" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip"
+              style="display:none" onchange="tkAdjuntarArchivos(this,'${ticket.id}')">
+          </label>
+          <!-- Texto -->
+          <textarea id="ticket-reply-txt" placeholder="Escribe tu respuesta o adjunta un archivo..."
             rows="2" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();enviarMensajeTicket('${ticket.id}')}"
-            style="flex:1;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;
+            style="flex:1;border:1px solid #e2e8f0;border-radius:10px;padding:9px 12px;
                    font-size:13px;resize:none;outline:none;font-family:inherit"></textarea>
+          <!-- Enviar -->
           <button onclick="enviarMensajeTicket('${ticket.id}')"
-            style="background:#059669;color:#fff;border:none;border-radius:10px;
-                   padding:10px 16px;font-size:20px;cursor:pointer;flex-shrink:0">➤</button>
+            style="flex-shrink:0;background:#059669;color:#fff;border:none;border-radius:10px;
+                   padding:9px 14px;font-size:20px;cursor:pointer">➤</button>
         </div>
-        <div style="font-size:10px;color:#94a3b8;margin-top:5px">Enter para enviar · Shift+Enter para nueva línea</div>
+        <div style="font-size:10px;color:#94a3b8;margin-top:4px">
+          Enter para enviar · 📎 para adjuntar · Imágenes, PDF, Word, Excel, ZIP
+        </div>
       </div>` : `
       <div style="padding:14px 18px;background:#f0fdf4;border-top:1px solid #d1fae5;text-align:center;
                   font-size:13px;font-weight:600;color:#15803d;flex-shrink:0">
@@ -5097,18 +5120,20 @@ async function abrirTicket(id) {
 
 // ── Enviar mensaje ────────────────────────────────────────────────────────────
 async function enviarMensajeTicket(ticketId) {
-  const txt = document.getElementById('ticket-reply-txt');
-  if (!txt || !txt.value.trim()) return;
-  const msg = txt.value.trim();
-  txt.value = '';
+  const txt  = document.getElementById('ticket-reply-txt');
+  const msg  = txt?.value.trim() || '';
+  const adjs = window._tkAdjuntos || [];
+  if (!msg && !adjs.length) return;
+  if (txt) txt.value = '';
+  window._tkAdjuntos = [];
+  const prev = document.getElementById('tk-adj-preview');
+  if (prev) prev.innerHTML = '';
   try {
-    await POST('/tickets/'+ticketId+'/mensajes', { mensaje: msg });
-    // Recargar el ticket abierto
+    await POST('/tickets/'+ticketId+'/mensajes', { mensaje: msg, adjuntos: adjs });
     document.getElementById('ticket-modal')?.remove();
     await abrirTicket(ticketId);
-    // Actualizar badge
     actualizarBadgeTickets();
-  } catch(e) { alert('Error: '+e.message); txt.value = msg; }
+  } catch(e) { alert('Error: '+e.message); if(txt) txt.value = msg; }
 }
 
 // ── Cambiar estado ────────────────────────────────────────────────────────────
@@ -5430,4 +5455,115 @@ function tkVerFoto(idx, fotos) {
   render();
   document.body.appendChild(modal);
   modal.addEventListener('click', e => { if(e.target===modal) modal.remove(); });
+}
+
+// ── Adjuntos en tickets ───────────────────────────────────────────────────────
+window._tkAdjuntos = [];
+
+function tkAdjuntarArchivos(input, ticketId) {
+  const files = Array.from(input.files);
+  if (!files.length) return;
+  const MAX = 5;
+  const restantes = MAX - (window._tkAdjuntos||[]).length;
+  if (restantes <= 0) { alert('Máximo 5 adjuntos por mensaje.'); input.value=''; return; }
+  const toAdd = files.slice(0, restantes);
+
+  toAdd.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      window._tkAdjuntos = window._tkAdjuntos || [];
+      window._tkAdjuntos.push({
+        nombre: file.name,
+        tipo:   file.type,
+        tamaño: file.size,
+        data:   e.target.result   // base64
+      });
+      _tkRenderAdjPreview();
+    };
+    reader.readAsDataURL(file);
+  });
+  input.value = '';
+}
+
+function _tkRenderAdjPreview() {
+  const cont = document.getElementById('tk-adj-preview');
+  if (!cont) return;
+  const adjs = window._tkAdjuntos || [];
+  if (!adjs.length) { cont.innerHTML = ''; return; }
+  cont.innerHTML = adjs.map((a, i) => {
+    const esImg = a.tipo && a.tipo.startsWith('image/');
+    const kb    = (a.tamaño / 1024).toFixed(0);
+    return `
+      <div style="position:relative;display:flex;align-items:center;gap:6px;
+                  background:#f1f5f9;border:1px solid #e2e8f0;border-radius:8px;
+                  padding:5px 8px;max-width:160px">
+        ${esImg
+          ? `<img src="${a.data}" style="width:32px;height:32px;object-fit:cover;border-radius:5px;flex-shrink:0">`
+          : `<div style="width:32px;height:32px;background:#e2e8f0;border-radius:5px;
+                         display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0">
+               ${_tkIconoTipo(a.tipo)}
+             </div>`}
+        <div style="min-width:0">
+          <div style="font-size:10px;font-weight:600;color:#1e293b;
+                      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px">
+            ${a.nombre}
+          </div>
+          <div style="font-size:9px;color:#94a3b8">${kb} KB</div>
+        </div>
+        <button onclick="window._tkAdjuntos.splice(${i},1);_tkRenderAdjPreview()"
+          style="position:absolute;top:-6px;right:-6px;background:#dc2626;color:#fff;border:none;
+                 border-radius:50%;width:16px;height:16px;font-size:10px;cursor:pointer;
+                 display:flex;align-items:center;justify-content:center;font-weight:700;
+                 line-height:1">✕</button>
+      </div>`;
+  }).join('');
+}
+
+function _tkIconoTipo(tipo) {
+  if (!tipo) return '📄';
+  if (tipo.includes('pdf'))  return '📕';
+  if (tipo.includes('word') || tipo.includes('doc'))  return '📘';
+  if (tipo.includes('excel') || tipo.includes('xls') || tipo.includes('sheet')) return '📗';
+  if (tipo.includes('zip') || tipo.includes('rar') || tipo.includes('compress')) return '🗜️';
+  if (tipo.includes('text')) return '📝';
+  if (tipo.includes('image')) return '🖼️';
+  return '📄';
+}
+
+function _tkRenderAdjunto(adj, esMio) {
+  if (!adj || !adj.nombre) return '';
+  const esImg = adj.tipo && adj.tipo.startsWith('image/');
+  const kb    = adj.tamaño ? (adj.tamaño/1024).toFixed(0)+' KB' : '';
+  const bg    = esMio ? 'rgba(255,255,255,.15)' : '#fff';
+  const borde = esMio ? 'rgba(255,255,255,.25)' : '#e2e8f0';
+  const color = esMio ? '#fff' : '#1e293b';
+  const sub   = esMio ? 'rgba(255,255,255,.65)' : '#64748b';
+
+  if (esImg && adj.data) {
+    return `
+      <div style="cursor:pointer" onclick="tkVerFoto(0,[${JSON.stringify(adj.data)}])">
+        <img src="${adj.data}"
+          style="max-width:200px;max-height:160px;border-radius:10px;
+                 border:2px solid ${borde};display:block;object-fit:cover">
+        <div style="font-size:9px;color:${sub};margin-top:2px;text-align:center">
+          ${adj.nombre}${kb?' · '+kb:''}
+        </div>
+      </div>`;
+  }
+
+  // Archivo no-imagen
+  return `
+    <div style="display:flex;align-items:center;gap:8px;background:${bg};
+                border:1px solid ${borde};border-radius:10px;padding:8px 12px;
+                min-width:140px;max-width:220px">
+      <div style="font-size:22px;flex-shrink:0">${_tkIconoTipo(adj.tipo)}</div>
+      <div style="min-width:0;flex:1">
+        <div style="font-size:12px;font-weight:600;color:${color};
+                    white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${adj.nombre}</div>
+        <div style="font-size:10px;color:${sub}">${kb}</div>
+      </div>
+      ${adj.data ? `
+      <a href="${adj.data}" download="${adj.nombre}" title="Descargar"
+        style="color:${color};font-size:16px;text-decoration:none;flex-shrink:0">⬇️</a>` : ''}
+    </div>`;
 }

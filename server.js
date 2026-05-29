@@ -263,9 +263,11 @@ function createSchema(){
     usuario_nombre TEXT,
     usuario_rol TEXT,
     mensaje TEXT NOT NULL,
+    adjuntos TEXT DEFAULT '[]',
     creado TEXT DEFAULT(datetime('now','-6 hours')),
     FOREIGN KEY(ticket_id) REFERENCES tickets(id)
   )`);
+  try { db.run(`ALTER TABLE ticket_mensajes ADD COLUMN adjuntos TEXT DEFAULT '[]'`); } catch(e) {}
   db.run(`CREATE TABLE IF NOT EXISTS whatsapp_numeros(
     id TEXT PRIMARY KEY,
     nombre TEXT NOT NULL,
@@ -1143,11 +1145,12 @@ app.post('/api/tickets/:id/mensajes', auth(), (req, res) => {
   try {
     const t = get(`SELECT * FROM tickets WHERE id=?`, [req.params.id]);
     if (!t) return res.status(404).json({error:'Ticket no encontrado'});
-    const { mensaje } = req.body;
-    if (!mensaje?.trim()) return res.status(400).json({error:'Mensaje vacío'});
-    run(`INSERT INTO ticket_mensajes(ticket_id,usuario_id,usuario_nombre,usuario_rol,mensaje)
-      VALUES(?,?,?,?,?)`,
-      [req.params.id, req.user.id, req.user.nombre, req.user.rol, mensaje.trim()]);
+    const { mensaje, adjuntos } = req.body;
+    if (!mensaje?.trim() && !(adjuntos?.length)) return res.status(400).json({error:'Mensaje o adjunto requerido'});
+    run(`INSERT INTO ticket_mensajes(ticket_id,usuario_id,usuario_nombre,usuario_rol,mensaje,adjuntos)
+      VALUES(?,?,?,?,?,?)`,
+      [req.params.id, req.user.id, req.user.nombre, req.user.rol,
+       (mensaje||'').trim(), JSON.stringify(adjuntos||[])]);
     // Si supervisor/admin responde → pasa a en_revision; si resuelto lo marca
     if (req.user.rol !== 'cajero' && t.estado === 'abierto') {
       run(`UPDATE tickets SET estado='en_revision' WHERE id=?`, [req.params.id]);
