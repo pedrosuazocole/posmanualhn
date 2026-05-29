@@ -241,6 +241,25 @@ function buildNav() {
 }
 
 let currentView = 'dashboard';
+// ── Sidebar hamburguesa (móvil) ──────────────────────────────────────────────
+function toggleSidebar() {
+  const sb  = document.getElementById('sidebar');
+  const ov  = document.getElementById('sidebar-overlay');
+  const btn = document.getElementById('menu-toggle');
+  if (!sb) return;
+  const open = sb.classList.toggle('open');
+  if (ov)  ov.classList.toggle('open', open);
+  if (btn) btn.textContent = open ? '✕' : '☰';
+}
+function closeSidebar() {
+  const sb  = document.getElementById('sidebar');
+  const ov  = document.getElementById('sidebar-overlay');
+  const btn = document.getElementById('menu-toggle');
+  if (sb)  sb.classList.remove('open');
+  if (ov)  ov.classList.remove('open');
+  if (btn) btn.textContent = '☰';
+}
+
 function navigateTo(view) {
   // Verificar permiso — dashboard y facturacion siempre accesibles
   if (view !== 'dashboard' && view !== 'facturacion' && PERMISOS_BLOQUEADOS[view]) {
@@ -248,6 +267,7 @@ function navigateTo(view) {
     return;
   }
   currentView = view;
+  closeSidebar(); // cerrar menú en móvil al navegar
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   const el = document.getElementById(view + '-view');
   if (el) el.classList.add('active');

@@ -694,10 +694,235 @@ body {
   gap: 8px;
 }
 
-/* ── RESPONSIVE ────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════
+   RESPONSIVE — Adaptación completa para todos los dispositivos
+   ══════════════════════════════════════════════════════════ */
+
+/* ── Botón hamburguesa (solo visible en móvil) ──────────── */
+#menu-toggle {
+  display: none;
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 2000;
+  background: #1e3a5f;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: #fff;
+  font-size: 18px;
+  line-height: 1;
+  box-shadow: 0 2px 8px rgba(0,0,0,.3);
+}
+
+/* ── Overlay para cerrar el sidebar en móvil ────────────── */
+#sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.5);
+  z-index: 1400;
+}
+#sidebar-overlay.open { display: block; }
+
+/* ══ TABLET  (≤1024px) ══════════════════════════════════════ */
+@media (max-width: 1024px) {
+  #sidebar { width: 160px; min-width: 160px; }
+  .nav-item { font-size: 11px; padding: 8px 10px; }
+  .pos-cart { width: 270px; min-width: 270px; }
+  .products-grid { grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); }
+  .report-cards  { grid-template-columns: 1fr 1fr; }
+}
+
+/* ══ MÓVIL  (≤768px) ════════════════════════════════════════ */
 @media (max-width: 768px) {
-  #sidebar { width: 140px; min-width: 140px; }
-  .pos-cart { width: 260px; min-width: 260px; }
+
+  /* ── Layout base ─────────────────────────────────────── */
+  body { overflow: auto; height: auto; min-height: 100vh; }
+
+  #app {
+    flex-direction: column;
+    height: auto;
+    min-height: 100vh;
+  }
+
+  /* ── Botón hamburguesa visible ───────────────────────── */
+  #menu-toggle { display: flex; align-items: center; justify-content: center; }
+
+  /* ── Sidebar: drawer lateral en móvil ───────────────── */
+  #sidebar {
+    position: fixed;
+    top: 0;
+    left: -200px;
+    width: 200px;
+    min-width: 200px;
+    height: 100vh;
+    z-index: 1500;
+    transition: left .25s ease;
+    overflow-y: auto;
+  }
+  #sidebar.open { left: 0; }
+
+  /* ── Main ocupa todo el ancho ────────────────────────── */
+  #main {
+    width: 100%;
+    padding-top: 44px; /* espacio para el botón hamburguesa */
+    overflow: visible;
+    height: auto;
+    min-height: calc(100vh - 44px);
+  }
+
+  /* ── Views ───────────────────────────────────────────── */
+  .view {
+    overflow-y: visible;
+    flex: none;
+    min-height: calc(100vh - 44px);
+  }
+  .view.active { display: flex; }
+
+  /* ── Page ────────────────────────────────────────────── */
+  .page { padding: 12px; gap: 12px; }
+
+  /* ── Page header apilado ─────────────────────────────── */
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .page-header > div:last-child,
+  .page-header > button,
+  .page-header > .btn-primary {
+    width: 100%;
+  }
+  .page-title { font-size: 17px; }
+
+  /* ── Búsqueda full-width ─────────────────────────────── */
+  .page-search { width: 100%; flex-direction: column; }
+  .search-box { width: 100%; }
+  .search-box input { width: 100%; }
+
+  /* ── Grids a 1 columna ───────────────────────────────── */
   .form-grid { grid-template-columns: 1fr; }
   .span2 { grid-column: span 1; }
+  .cards-grid { grid-template-columns: 1fr; }
+  .report-cards { grid-template-columns: 1fr; }
+
+  /* ── Tablas con scroll horizontal ────────────────────── */
+  .data-table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .data-table table { min-width: 500px; }
+
+  /* ══ POS EN MÓVIL — pantalla completa por secciones ═════ */
+  #pos-view {
+    flex-direction: column;
+    overflow: visible;
+    height: auto;
+  }
+  .pos-products {
+    width: 100%;
+    padding: 8px;
+    overflow: visible;
+    height: auto;
+  }
+  .pos-cart {
+    width: 100%;
+    min-width: unset;
+    border-left: none;
+    border-top: 2px solid #e2e8f0;
+    max-height: none;
+  }
+  .products-grid {
+    grid-template-columns: repeat(auto-fill, minmax(130px,1fr));
+    overflow-y: visible;
+    height: auto;
+    max-height: none;
+  }
+
+  /* ══ MODALES full-width en móvil ═════════════════════════ */
+  .modal-overlay { padding: 0; align-items: flex-end; }
+  .modal {
+    max-width: 100%;
+    border-radius: 18px 18px 0 0;
+    max-height: 92vh;
+  }
+  .modal-form { padding: 14px 16px 16px; }
+  .modal-header { padding: 14px 16px; }
+
+  /* Modales inline (creados con JS) ───────────────────── */
+  div[style*="max-width:500px"],
+  div[style*="max-width:420px"],
+  div[style*="max-width:460px"],
+  div[style*="max-width:440px"],
+  div[style*="max-width:400px"] {
+    max-width: 100% !important;
+    width: 100% !important;
+    margin: 0 !important;
+    border-radius: 18px 18px 0 0 !important;
+  }
+
+  /* Panel lateral de ticket (drawer) full width ────────── */
+  div[style*="max-width:520px"] {
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+
+  /* ── Botones de acción apilados ──────────────────────── */
+  .modal-actions { flex-direction: column; }
+  .modal-actions button,
+  .modal-actions .btn-primary,
+  .modal-actions .btn-cancel { width: 100%; }
+
+  /* ── Tabla de datos: ocultar columnas secundarias ─────── */
+  .data-table .hide-mobile { display: none; }
+
+  /* ── Invoice box ─────────────────────────────────────── */
+  .invoice-box { padding: 16px; }
+  .firma-row { flex-direction: column; gap: 16px; }
+
+  /* ── Botones primarios full-width en contextos clave ─── */
+  .btn-invoice { font-size: 14px; padding: 11px; }
+
+  /* ── Cards de ventas ─────────────────────────────────── */
+  .sale-card { flex-wrap: wrap; gap: 6px; }
+
+  /* ── Dashboard stats grid ────────────────────────────── */
+  div[style*="grid-template-columns:repeat(4"] {
+    grid-template-columns: repeat(2,1fr) !important;
+  }
+
+  /* ── Consolidado turnos grid ─────────────────────────── */
+  div[style*="grid-template-columns:repeat(auto-fit,minmax(110px"] {
+    grid-template-columns: repeat(2,1fr) !important;
+  }
+
+  /* ── Historial turnos: grid de 3 cajas → 2 cols ───────── */
+  div[style*="grid-template-columns:repeat(3,1fr)"] {
+    grid-template-columns: repeat(2,1fr) !important;
+  }
+
+  /* ── Precios / planes ────────────────────────────────── */
+  .res-val { font-size: 16px; }
+
+  /* ── Scrollbar más ancho para touch ─────────────────── */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+}
+
+/* ══ MÓVIL PEQUEÑO  (≤420px) ════════════════════════════════ */
+@media (max-width: 420px) {
+  .page { padding: 10px; gap: 10px; }
+  .page-title { font-size: 15px; }
+  .products-grid { grid-template-columns: repeat(2,1fr); }
+  .data-table table { min-width: 400px; }
+  .nav-item { font-size: 11px; padding: 7px 10px; }
+
+  div[style*="grid-template-columns:repeat(4"] {
+    grid-template-columns: repeat(2,1fr) !important;
+  }
+}
+
+/* ══ PANTALLA GRANDE  (≥1400px) ═════════════════════════════ */
+@media (min-width: 1400px) {
+  #sidebar { width: 200px; min-width: 200px; }
+  .nav-item { font-size: 13px; padding: 10px 14px; }
+  .products-grid { grid-template-columns: repeat(auto-fill, minmax(180px,1fr)); }
 }
