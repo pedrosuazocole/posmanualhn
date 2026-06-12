@@ -694,10 +694,181 @@ body {
   gap: 8px;
 }
 
-/* ── RESPONSIVE ────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════
+   RESPONSIVE & PWA — MetricPOS v7.3
+   ══════════════════════════════════════════════════════════ */
+
+/* Botón hamburger — oculto en desktop */
+#btn-hamburger {
+  display: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 8px;
+  color: #1e3a5f;
+  flex-shrink: 0;
+}
+#btn-hamburger svg { display: block; }
+
+/* Overlay del sidebar en móvil */
+#sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  z-index: 199;
+}
+#sidebar-overlay.active { display: block; }
+
+/* Toast mejorado para móvil */
+#toast-msg {
+  max-width: calc(100vw - 32px);
+  word-break: break-word;
+}
+
+/* ── TABLET (≤900px) ─────────────────────────────────────── */
+@media (max-width: 900px) {
+  #sidebar { width: 160px; min-width: 160px; }
+  .pos-cart { width: 240px; min-width: 240px; }
+  .form-grid { grid-template-columns: 1fr 1fr; }
+}
+
+/* ── MOBILE (≤768px) ─────────────────────────────────────── */
 @media (max-width: 768px) {
-  #sidebar { width: 140px; min-width: 140px; }
-  .pos-cart { width: 260px; min-width: 260px; }
+
+  /* Sidebar → drawer lateral */
+  #sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: 220px;
+    z-index: 200;
+    transform: translateX(-100%);
+    transition: transform .25s cubic-bezier(.4,0,.2,1);
+    box-shadow: 4px 0 24px rgba(0,0,0,.25);
+  }
+  #sidebar.open { transform: translateX(0); }
+
+  /* Topbar */
+  #topbar {
+    padding: 0 12px;
+    height: 52px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  #btn-hamburger { display: flex; align-items: center; justify-content: center; }
+  .topbar-branch { font-size: 11px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar-role { display: none; }
+  .topbar-version { display: none; }
+  #topbar-user { font-size: 11px; }
+
+  /* Main ocupa toda la pantalla */
+  #main {
+    width: 100%;
+    height: calc(100vh - 52px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Pages */
+  .page { padding: 12px; }
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .page-header .btn-primary { width: 100%; }
+  .page-title { font-size: 16px; }
+
+  /* Grids → una columna */
   .form-grid { grid-template-columns: 1fr; }
-  .span2 { grid-column: span 1; }
+  .span2, .span3 { grid-column: span 1; }
+  .report-cards { grid-template-columns: 1fr; }
+
+  /* Tablas → scroll horizontal */
+  .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table { min-width: 500px; }
+
+  /* POS: layout vertical */
+  #pos-layout {
+    flex-direction: column !important;
+    height: auto !important;
+  }
+  #pos-productos {
+    height: 50vh;
+    min-height: 280px;
+  }
+  .pos-cart {
+    width: 100% !important;
+    min-width: 0 !important;
+    height: 50vh;
+    min-height: 300px;
+    border-left: none !important;
+    border-top: 2px solid #e2e8f0;
+  }
+
+  /* Dashboard KPIs: 2 columnas */
+  #dash-kpis { grid-template-columns: 1fr 1fr !important; }
+
+  /* Modales full screen en móvil */
+  .modal-inner,
+  div[style*="max-width:480px"],
+  div[style*="max-width:500px"],
+  div[style*="max-width:520px"],
+  div[style*="max-width:540px"],
+  div[style*="max-width:600px"] {
+    width: 96vw !important;
+    max-width: 96vw !important;
+    margin: 2vw !important;
+    max-height: 92vh !important;
+    overflow-y: auto !important;
+  }
+
+  /* Botones de acción */
+  .btn-primary, .btn-save, .btn-cancel {
+    min-height: 42px;
+    font-size: 13px;
+  }
+
+  /* Inputs más grandes para touch */
+  input, select, textarea {
+    font-size: 16px !important; /* evita zoom en iOS */
+    min-height: 40px;
+  }
+  input[type="number"] { font-size: 16px !important; }
+
+  /* Tickets dashboard: 2 cols → 1 */
+  #dash-turnos > div { grid-template-columns: 1fr !important; }
+
+  /* Facturación botones */
+  .pos-search-bar { flex-wrap: wrap; gap: 8px; }
+  .pos-search-bar input { min-width: 0; flex: 1; }
+}
+
+/* ── MOBILE PEQUEÑO (≤480px) ─────────────────────────────── */
+@media (max-width: 480px) {
+  #dash-kpis { grid-template-columns: 1fr 1fr !important; gap: 8px !important; }
+  .page { padding: 10px; }
+  .topbar-branch { max-width: 80px; }
+
+  /* Ticket stats: 2x2 */
+  div[style*="grid-template-columns:repeat(4"] {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  /* Ocultar columnas menos importantes en tablas */
+  .col-hide-xs { display: none !important; }
+}
+
+/* ── SAFE AREA (iPhone notch/home bar) ───────────────────── */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  #main { padding-bottom: env(safe-area-inset-bottom); }
+  #topbar { padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
+}
+
+/* ── PWA STANDALONE: ocultar elementos del browser ──────── */
+@media (display-mode: standalone) {
+  body { padding-top: env(safe-area-inset-top, 0); }
 }

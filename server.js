@@ -1,4 +1,18 @@
 'use strict';
+// Cargar variables de entorno desde .env (uso local)
+const envPath = require('path').join(__dirname, '.env');
+if (require('fs').existsSync(envPath)) {
+  require('fs').readFileSync(envPath, 'utf8').split('\n').forEach(line => {
+    const trimmed = line.trim();
+    if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
+      const idx = trimmed.indexOf('=');
+      const key = trimmed.substring(0, idx).trim();
+      const val = trimmed.substring(idx + 1).trim();
+      if (key && !process.env[key]) process.env[key] = val;
+    }
+  });
+}
+
 const express    = require('express');
 const bcrypt     = require('bcryptjs');
 const jwt        = require('jsonwebtoken');
@@ -7,6 +21,7 @@ const helmet     = require('helmet');
 const path       = require('path');
 const fs         = require('fs');
 const { v4: uuid } = require('uuid');
+const PDFDocument = require('pdfkit');
 
 // Honduras UTC-6 helper
 function nowHN() {
@@ -25,13 +40,41 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'metricpos_secret_2026_hn';
 const LICENSE_SECRET = process.env.LICENSE_SECRET || 'MPOS2026HN_LIC_KEY';
-// Railway Volume: si existe RAILWAY_VOLUME_MOUNT_PATH usar ese path, si no usar ./data local
-const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH
-  ? process.env.RAILWAY_VOLUME_MOUNT_PATH
-  : path.join(__dirname, 'data');
-const DB_FILE = path.join(DATA_DIR, 'metricpos.db');
+// Railway Volume: detectar automáticamente la ruta correcta con permisos de escritura
+function _resolveDataDir() {
+  const candidates = [
+    process.env.RAILWAY_VOLUME_MOUNT_PATH,      // Volume de Railway (prioridad)
+    process.env.DATA_DIR,                        // Variable manual
+    '/data',                                     // Mount path por defecto en Railway
+    path.join(__dirname, 'data'),                // Local Windows/Linux
+    '/tmp/metricpos'                             // Último recurso (Railway sin volumen)
+  ].filter(Boolean);
 
-app.use(cors());
+  for (const dir of candidates) {
+    try {
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      // Verificar que se puede escribir
+      const test = path.join(dir, '.write_test');
+      fs.writeFileSync(test, 'ok');
+      fs.unlinkSync(test);
+      console.log(`📁 DATA_DIR: ${dir}`);
+      return dir;
+    } catch(e) {
+      console.warn(`⚠️  Sin permisos en ${dir}, probando siguiente...`);
+    }
+  }
+  throw new Error('No se encontró ningún directorio con permisos de escritura');
+}
+
+const DATA_DIR = _resolveDataDir();
+const DB_FILE  = path.join(DATA_DIR, 'metricpos.db');
+
+// Confiar en el proxy de Railway/nginx para HTTPS y IPs reales
+app.set('trust proxy', 1);
+
+// CORS: en producción solo el dominio propio, en dev abierto
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+app.use(cors({ origin: CORS_ORIGIN, credentials: true }));
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -39,7 +82,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 let db; let SQL;
 
 async function initDB() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   SQL = await initSqlJs();
   if (fs.existsSync(DB_FILE)) { db=new SQL.Database(fs.readFileSync(DB_FILE)); console.log('📂 DB cargada'); }
   else { db=new SQL.Database(); console.log('🆕 DB nueva'); }
@@ -169,6 +211,8 @@ function createSchema(){
     diferencia REAL DEFAULT 0,
     estado TEXT DEFAULT 'abierto' CHECK(estado IN('abierto','cerrado')),
     notas TEXT,
+    sobrante REAL DEFAULT 0,
+    motivo_sobrante TEXT,
     FOREIGN KEY(sucursal_id) REFERENCES sucursales(id),
     FOREIGN KEY(usuario_id) REFERENCES usuarios(id)
   )`);
@@ -224,14 +268,66 @@ function createSchema(){
     activa INTEGER DEFAULT 1,
     creado TEXT DEFAULT(datetime('now','-6 hours'))
   )`);
+  // ── TICKETS DE TURNO ──
+  db.run(`CREATE TABLE IF NOT EXISTS tickets(
+    id TEXT PRIMARY KEY,
+    turno_id TEXT,
+    cajero_id TEXT NOT NULL,
+    cajero_nombre TEXT,
+    turno_letra TEXT,
+    fecha_cierre TEXT,
+    estado TEXT DEFAULT 'abierto' CHECK(estado IN('abierto','en_revision','resuelto')),
+    total_ventas REAL DEFAULT 0,
+    reporte_articulos TEXT,
+    area TEXT,
+    titulo TEXT,
+    tipo TEXT,
+    descripcion TEXT,
+    prioridad TEXT DEFAULT 'media' CHECK(prioridad IN('urgente','alta','media','baja')),
+    asignado_a TEXT,
+    asignado_nombre TEXT,
+    fotos TEXT DEFAULT '[]',
+    creado TEXT DEFAULT(datetime('now','-6 hours'))
+  )`);
+  // Migraciones para BD existentes
+  try { db.run(`ALTER TABLE tickets ADD COLUMN area TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN titulo TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN tipo TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN descripcion TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN prioridad TEXT DEFAULT 'media'`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN asignado_a TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN asignado_nombre TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN fotos TEXT DEFAULT '[]'`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN resolucion TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN pdf_resolucion TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN pdf_token TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN adjunto_token TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE tickets ADD COLUMN adjunto_mime TEXT`); } catch(e) {}
+  db.run(`CREATE TABLE IF NOT EXISTS ticket_mensajes(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id TEXT NOT NULL,
+    usuario_id TEXT NOT NULL,
+    usuario_nombre TEXT,
+    usuario_rol TEXT,
+    mensaje TEXT NOT NULL,
+    creado TEXT DEFAULT(datetime('now','-6 hours')),
+    FOREIGN KEY(ticket_id) REFERENCES tickets(id)
+  )`);
   db.run(`CREATE TABLE IF NOT EXISTS whatsapp_numeros(
     id TEXT PRIMARY KEY,
     nombre TEXT NOT NULL,
     numero TEXT NOT NULL,
+    callmebot_apikey TEXT,
     activo INTEGER DEFAULT 1,
     creado TEXT DEFAULT(datetime('now','-6 hours'))
   )`);
+  // Migración para BD existentes
+  try { db.run(`ALTER TABLE whatsapp_numeros ADD COLUMN callmebot_apikey TEXT`); } catch(e) {}
   try { db.run(`ALTER TABLE turnos ADD COLUMN turno_letra TEXT DEFAULT 'A'`); } catch(e) {}
+  try { db.run(`ALTER TABLE turnos ADD COLUMN sobrante REAL DEFAULT 0`); } catch(e) {}
+  try { db.run(`ALTER TABLE turnos ADD COLUMN motivo_sobrante TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE turnos ADD COLUMN pdf_cierre TEXT`); } catch(e) {}
+  try { db.run(`ALTER TABLE turnos ADD COLUMN pdf_token TEXT`); } catch(e) {}
   // ── VENTA_ID EN CxC PARA VENTAS A CREDITO ──
   try { db.run(`ALTER TABLE cxc ADD COLUMN venta_id TEXT`); } catch(e) {}
   try { db.run(`ALTER TABLE ventas ADD COLUMN serie_id TEXT`); } catch(e) {}
@@ -768,10 +864,19 @@ app.get('/api/reportes/ventas_por_mes',auth(),(req,res)=>{
 });
 app.get('/api/reportes/articulos_por_dia',auth(),(req,res)=>{
   const suc=req.query.sucursal_id||req.user.sucursal_id;
-  const{fecha_ini,fecha_fin,serie}=req.query;
+  const{fecha_ini,fecha_fin,hora_ini,hora_fin,serie}=req.query;
   let w=`WHERE v.sucursal_id=? AND v.estado='emitida'`;const p=[suc];
-  if(fecha_ini){w+=` AND date(v.fecha)>=?`;p.push(fecha_ini);}
-  if(fecha_fin){w+=` AND date(v.fecha)<=?`;p.push(fecha_fin);}
+  // Filtro con hora: si hay hora usar datetime completo, si no solo fecha
+  if(fecha_ini){
+    const dIni = hora_ini ? fecha_ini+'T'+hora_ini : fecha_ini;
+    w += hora_ini ? ` AND datetime(v.fecha)>=datetime(?)` : ` AND date(v.fecha)>=?`;
+    p.push(dIni);
+  }
+  if(fecha_fin){
+    const dFin = hora_fin ? fecha_fin+'T'+hora_fin : fecha_fin;
+    w += hora_fin ? ` AND datetime(v.fecha)<=datetime(?)` : ` AND date(v.fecha)<=?`;
+    p.push(dFin);
+  }
   if(serie){w+=` AND v.numero_factura LIKE ?`;p.push(serie.replace(/-+$/,'')+'%');}
   res.json(all(`SELECT date(v.fecha)as dia,vi.producto_codigo,vi.producto_nombre,vi.producto_categoria,SUM(vi.cantidad)as unidades,SUM(vi.subtotal)as total FROM venta_items vi JOIN ventas v ON v.id=vi.venta_id ${w} GROUP BY dia,vi.producto_id ORDER BY dia DESC,total DESC`,p));
 });
@@ -862,6 +967,75 @@ app.get('/api/turnos',auth(['admin','supervisor']),(req,res)=>{
     res.json(all(`SELECT t.*,u.nombre as usuario_nombre FROM turnos t LEFT JOIN usuarios u ON u.id=t.usuario_id ${w} ORDER BY t.fecha_apertura DESC LIMIT 200`,p));
   } catch(e){ console.error('turnos GET:',e.message); res.status(500).json({error:e.message}); }
 });
+// Reporte consolidado de todos los turnos del día
+app.get('/api/turnos/consolidado_dia', auth(), (req, res) => {
+  try {
+    const suc  = req.query.sucursal_id || req.user.sucursal_id;
+    const fecha = req.query.fecha || new Date(Date.now()-6*3600000).toISOString().substring(0,10);
+
+    // Turnos del día (abiertos y cerrados)
+    const turnos = all(
+      `SELECT t.*, u.nombre as usuario_nombre
+       FROM turnos t LEFT JOIN usuarios u ON u.id=t.usuario_id
+       WHERE t.sucursal_id=? AND date(t.fecha_apertura)=?
+       ORDER BY t.turno_letra, t.fecha_apertura`,
+      [suc, fecha]);
+
+    // Para cada turno calcular totales reales desde ventas
+    turnos.forEach(t => {
+      const tot = get(
+        `SELECT COALESCE(SUM(total),0) as tv,
+                COALESCE(SUM(CASE WHEN forma_pago='efectivo'       THEN total ELSE 0 END),0) as te,
+                COALESCE(SUM(CASE WHEN forma_pago='tarjeta'        THEN total ELSE 0 END),0) as tt,
+                COALESCE(SUM(CASE WHEN forma_pago='transferencia'  THEN total ELSE 0 END),0) as tr,
+                COUNT(*) as nv
+         FROM ventas WHERE turno_id=? AND estado='emitida'`, [t.id]) || {};
+      t.tv = tot.tv||0; t.te = tot.te||0;
+      t.tt = tot.tt||0; t.tr = tot.tr||0; t.nv = tot.nv||0;
+
+      // Artículos vendidos en el turno
+      t.articulos = all(
+        `SELECT vi.producto_codigo, vi.producto_nombre, vi.producto_categoria,
+                SUM(vi.cantidad) as unidades, SUM(vi.subtotal) as total
+         FROM venta_items vi JOIN ventas v ON v.id=vi.venta_id
+         WHERE v.turno_id=? AND v.estado='emitida'
+         GROUP BY vi.producto_id ORDER BY total DESC`, [t.id]);
+    });
+
+    res.json({ fecha, turnos });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Turnos cerrados del propio cajero (para reimpresión)
+app.get('/api/turnos/mis_turnos',auth(),(req,res)=>{
+  try {
+    const limite = parseInt(req.query.limite)||10;
+    const rows = all(
+      `SELECT t.*,u.nombre as usuario_nombre FROM turnos t
+       LEFT JOIN usuarios u ON u.id=t.usuario_id
+       WHERE t.usuario_id=? AND t.estado='cerrado'
+       ORDER BY t.fecha_cierre DESC LIMIT ?`,
+      [req.user.id, limite]);
+    // Agregar totales reales desde ventas para cada turno
+    rows.forEach(t => {
+      const res2 = get(
+        `SELECT COALESCE(SUM(total),0) as tv,
+                COALESCE(SUM(CASE WHEN forma_pago='efectivo' THEN total ELSE 0 END),0) as te,
+                COALESCE(SUM(CASE WHEN forma_pago='tarjeta' THEN total ELSE 0 END),0) as tt,
+                COALESCE(SUM(CASE WHEN forma_pago='transferencia' THEN total ELSE 0 END),0) as tr,
+                COUNT(*) as nv
+         FROM ventas WHERE turno_id=? AND estado='emitida'`,
+        [t.id]) || {};
+      t.total_ventas        = res2.tv || 0;
+      t.total_efectivo      = res2.te || 0;
+      t.total_tarjeta       = res2.tt || 0;
+      t.total_transferencia = res2.tr || 0;
+      t.num_ventas          = res2.nv || 0;
+    });
+    res.json(rows);
+  } catch(e){ res.status(500).json({error:e.message}); }
+});
+
 app.post('/api/turnos/abrir',auth(),(req,res)=>{
   try {
     const suc=req.user.sucursal_id;
@@ -879,14 +1053,15 @@ app.post('/api/turnos/:id/cerrar',auth(),(req,res)=>{
   try {
     const turno=get(`SELECT * FROM turnos WHERE id=? AND estado='abierto'`,[req.params.id]);
     if(!turno)return res.status(404).json({error:'Turno no encontrado o ya cerrado'});
-    const{efectivo_contado,notas}=req.body;
+    const{efectivo_contado,notas,sobrante,motivo_sobrante}=req.body;
     const resumen=get(`SELECT COALESCE(SUM(total),0)as total_ventas,COALESCE(SUM(CASE WHEN forma_pago='efectivo' THEN total ELSE 0 END),0)as total_efectivo,COALESCE(SUM(CASE WHEN forma_pago='tarjeta' THEN total ELSE 0 END),0)as total_tarjeta,COALESCE(SUM(CASE WHEN forma_pago='transferencia' THEN total ELSE 0 END),0)as total_transferencia FROM ventas WHERE turno_id=? AND estado='emitida'`,[req.params.id])||{};
     const egresos=get(`SELECT COALESCE(SUM(monto),0)as total FROM movimientos_caja WHERE turno_id=? AND tipo='egreso'`,[req.params.id])||{};
     const efectivo_esp=(turno.fondo_inicial||0)+(resumen.total_efectivo||0)-(egresos.total||0);
     const contado=parseFloat(efectivo_contado)||0;
     const diferencia=contado-efectivo_esp;
-    run(`UPDATE turnos SET estado='cerrado',fecha_cierre=datetime('now','-6 hours'),total_ventas=?,total_efectivo=?,total_tarjeta=?,total_transferencia=?,total_egresos=?,efectivo_esperado=?,efectivo_contado=?,diferencia=?,notas=? WHERE id=?`,
-      [resumen.total_ventas||0,resumen.total_efectivo||0,resumen.total_tarjeta||0,resumen.total_transferencia||0,egresos.total||0,efectivo_esp,contado,diferencia,notas||turno.notas||'',req.params.id]);
+    const sobranteVal=parseFloat(sobrante)||0;
+    run(`UPDATE turnos SET estado='cerrado',fecha_cierre=datetime('now','-6 hours'),total_ventas=?,total_efectivo=?,total_tarjeta=?,total_transferencia=?,total_egresos=?,efectivo_esperado=?,efectivo_contado=?,diferencia=?,notas=?,sobrante=?,motivo_sobrante=? WHERE id=?`,
+      [resumen.total_ventas||0,resumen.total_efectivo||0,resumen.total_tarjeta||0,resumen.total_transferencia||0,egresos.total||0,efectivo_esp,contado,diferencia,notas||turno.notas||'',sobranteVal,motivo_sobrante||'',req.params.id]);
     saveDB();
     res.json({ok:1,total_ventas:resumen.total_ventas||0,total_efectivo:resumen.total_efectivo||0,total_tarjeta:resumen.total_tarjeta||0,total_transferencia:resumen.total_transferencia||0,fondo_inicial:turno.fondo_inicial||0,egresos:egresos.total||0,efectivo_esperado:efectivo_esp,diferencia});
   } catch(e){ console.error('turnos/cerrar:',e.message); res.status(500).json({error:e.message}); }
@@ -916,15 +1091,658 @@ app.get('/api/whatsapp',auth(),(req,res)=>{
   res.json(all(`SELECT * FROM whatsapp_numeros WHERE activo=1 ORDER BY nombre`));
 });
 app.post('/api/whatsapp',auth(['admin']),(req,res)=>{
-  const{nombre,numero}=req.body;
+  const{nombre,numero,callmebot_apikey}=req.body;
   if(!nombre||!numero) return res.status(400).json({error:'Nombre y número requeridos'});
-  run(`INSERT INTO whatsapp_numeros(id,nombre,numero)VALUES(?,?,?)`,[uuid(),nombre,numero]);
+  run(`INSERT INTO whatsapp_numeros(id,nombre,numero,callmebot_apikey)VALUES(?,?,?,?)`,
+    [uuid(),nombre,numero,callmebot_apikey||null]);
+  saveDB(); res.json({ok:1});
+});
+// Actualizar apikey de un número existente
+app.put('/api/whatsapp/:id',auth(['admin']),(req,res)=>{
+  const{callmebot_apikey,nombre,numero}=req.body;
+  run(`UPDATE whatsapp_numeros SET nombre=COALESCE(?,nombre),numero=COALESCE(?,numero),callmebot_apikey=? WHERE id=?`,
+    [nombre||null,numero||null,callmebot_apikey||null,req.params.id]);
   saveDB(); res.json({ok:1});
 });
 app.delete('/api/whatsapp/:id',auth(['admin']),(req,res)=>{
   run(`UPDATE whatsapp_numeros SET activo=0 WHERE id=?`,[req.params.id]);
   saveDB(); res.json({ok:1});
 });
+// ── TEXTMEBOT: Envío automático de mensajes ─────────────────────────────────
+// TextMeBot API: https://textmebot.com
+// Texto: GET https://api.textmebot.com/send.php?recipient=+NUMERO&apikey=KEY&text=MENSAJE
+// PDF:   GET https://api.textmebot.com/send.php?recipient=+NUMERO&apikey=KEY&document=URL_SIN_ENCODEAR&filename=archivo.pdf
+async function _textmebotEnviar({ numero, apikey, mensaje, pdfUrl, pdfNombre }) {
+  const tel = numero.replace(/[^0-9]/g, '');
+  let url;
+  if (pdfUrl) {
+    // IMPORTANTE: pdfUrl NO debe ir encodeada — TextMeBot la necesita en texto plano
+    // Solo encodear filename y text
+    url = `https://api.textmebot.com/send.php?recipient=%2B${tel}&apikey=${apikey}&document=${pdfUrl}&filename=${encodeURIComponent(pdfNombre||'Reporte.pdf')}&json=yes`;
+    if (mensaje) url += `&text=${encodeURIComponent(mensaje)}`;
+  } else {
+    url = `https://api.textmebot.com/send.php?recipient=%2B${tel}&apikey=${apikey}&text=${encodeURIComponent(mensaje)}&json=yes`;
+  }
+  const r = await fetch(url, { signal: AbortSignal.timeout(30000) });
+  const txt = await r.text();
+  console.log(`TextMeBot respuesta [${pdfUrl?'PDF':'texto'}]:`, txt.substring(0, 200));
+  try { return JSON.parse(txt); } catch(e) { return { status: txt }; }
+}
+
+app.post('/api/whatsapp/send', auth(), async (req, res) => {
+  const { numero, apikey, mensaje, pdfUrl, pdfNombre } = req.body;
+  if (!numero || !apikey || (!mensaje && !pdfUrl)) {
+    return res.status(400).json({ error: 'numero, apikey y (mensaje o pdfUrl) son requeridos' });
+  }
+  try {
+    const data = await _textmebotEnviar({ numero, apikey, mensaje, pdfUrl, pdfNombre });
+    res.json({ ok: true, respuesta: data });
+  } catch(e) {
+    res.status(500).json({ error: e.message, ok: false });
+  }
+});
+
+// Envío masivo al cerrar turno vía TextMeBot (con PDF adjunto)
+app.post('/api/whatsapp/send-turno', auth(), async (req, res) => {
+  const { turno_id, mensaje_corte, mensaje_articulos } = req.body;
+  if (!turno_id) return res.status(400).json({ error: 'turno_id requerido' });
+
+  const numeros = all(`SELECT * FROM whatsapp_numeros WHERE activo=1 AND callmebot_apikey IS NOT NULL AND callmebot_apikey != ''`);
+  if (!numeros.length) return res.json({ ok: true, enviados: 0, msg: 'Sin números con API Key configurada' });
+
+  // ── Generar PDF del corte de turno ──────────────────────────────────────────
+  let pdfBase64 = null;
+  let pdfToken  = null;
+  try {
+    const data   = get(`SELECT t.*, u.nombre as cajero_nombre FROM turnos t LEFT JOIN usuarios u ON u.id=t.usuario_id WHERE t.id=?`, [turno_id]);
+    const ventas = all(`SELECT * FROM ventas WHERE turno_id=? AND estado='emitida' ORDER BY fecha ASC`, [turno_id]);
+    const movs   = all(`SELECT * FROM movimientos_caja WHERE turno_id=? ORDER BY fecha ASC`, [turno_id]);
+    const ahora  = new Date(new Date().getTime() - 6*3600000).toISOString().replace('T',' ').substring(0,19);
+
+    if (data) {
+      pdfBase64 = await new Promise((resolve, reject) => {
+        const doc    = new PDFDocument({ margin: 50, size: 'A4' });
+        const chunks = [];
+        doc.on('data',  c => chunks.push(c));
+        doc.on('end',   () => resolve(Buffer.concat(chunks).toString('base64')));
+        doc.on('error', reject);
+
+        // ── Encabezado ──
+        doc.fontSize(16).fillColor('#1e3a5f')
+           .text('REPORTE DE CIERRE DE TURNO', { align: 'center' });
+        doc.moveDown(0.3);
+        doc.fontSize(10).fillColor('#64748b')
+           .text(`Generado: ${ahora}`, { align: 'center' });
+        doc.moveDown(0.5);
+        doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#1e3a5f').lineWidth(2).stroke();
+        doc.moveDown(0.5);
+
+        // ── Datos del turno ──
+        const campos = [
+          ['Turno',           data.turno_letra || 'A'],
+          ['Cajero',          data.cajero_nombre || '—'],
+          ['Apertura',        (data.fecha_apertura||'—').substring(0,16)],
+          ['Cierre',          (data.fecha_cierre||'—').substring(0,16)],
+          ['Fondo Inicial',   'L. ' + parseFloat(data.fondo_inicial||0).toFixed(2)],
+          ['Total Ventas',    'L. ' + parseFloat(data.total_ventas||0).toFixed(2)],
+          ['Efectivo',        'L. ' + parseFloat(data.total_efectivo||0).toFixed(2)],
+          ['Tarjeta',         'L. ' + parseFloat(data.total_tarjeta||0).toFixed(2)],
+          ['Transferencia',   'L. ' + parseFloat(data.total_transferencia||0).toFixed(2)],
+          ['Egresos',         'L. ' + parseFloat(data.total_egresos||0).toFixed(2)],
+          ['Efectivo Esperado','L. ' + parseFloat(data.efectivo_esperado||0).toFixed(2)],
+          ['Efectivo Contado','L. ' + parseFloat(data.efectivo_contado||0).toFixed(2)],
+          ['Diferencia',      'L. ' + parseFloat(data.diferencia||0).toFixed(2)],
+        ];
+        if (parseFloat(data.sobrante||0) !== 0) {
+          campos.push(['Sobrante', 'L. ' + parseFloat(data.sobrante||0).toFixed(2)]);
+          if (data.motivo_sobrante) campos.push(['Motivo Sobrante', data.motivo_sobrante]);
+        }
+        if (data.notas) campos.push(['Notas', data.notas]);
+
+        doc.fontSize(10).fillColor('#1e293b');
+        campos.forEach(([l, v]) => {
+          doc.font('Helvetica-Bold').text(`${l}: `, { continued: true })
+             .font('Helvetica').text(v);
+        });
+        doc.moveDown(0.5);
+        doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#e2e8f0').lineWidth(1).stroke();
+        doc.moveDown(0.5);
+
+        // ── Resumen de artículos (desde mensaje_articulos si se pasó) ──
+        if (mensaje_articulos) {
+          doc.fontSize(11).fillColor('#1e3a5f').font('Helvetica-Bold')
+             .text('ARTÍCULOS VENDIDOS EN EL TURNO');
+          doc.moveDown(0.2);
+          doc.fontSize(8).fillColor('#1e293b').font('Courier')
+             .text(mensaje_articulos, { lineGap: 2 });
+          doc.moveDown(0.5);
+          doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#e2e8f0').lineWidth(1).stroke();
+          doc.moveDown(0.5);
+        }
+
+        // ── Detalle de ventas ──
+        if (ventas.length) {
+          doc.fontSize(11).fillColor('#1e3a5f').font('Helvetica-Bold')
+             .text(`DETALLE DE VENTAS (${ventas.length})`);
+          doc.moveDown(0.2);
+          ventas.forEach(v => {
+            doc.fontSize(9).fillColor('#1e293b').font('Helvetica')
+               .text(`  ${(v.fecha||'').substring(0,16)}  Fac. ${v.numero_factura||'—'}  ${v.forma_pago||'—'}  L. ${parseFloat(v.total||0).toFixed(2)}`, { lineGap: 1 });
+          });
+          doc.moveDown(0.5);
+          doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#e2e8f0').lineWidth(1).stroke();
+          doc.moveDown(0.5);
+        }
+
+        // ── Movimientos de caja ──
+        if (movs.length) {
+          doc.fontSize(11).fillColor('#1e3a5f').font('Helvetica-Bold')
+             .text('MOVIMIENTOS DE CAJA');
+          doc.moveDown(0.2);
+          movs.forEach(m => {
+            doc.fontSize(9).fillColor('#1e293b').font('Helvetica')
+               .text(`  ${(m.fecha||'').substring(0,16)}  [${m.tipo||'—'}]  ${m.concepto||'—'}  L. ${parseFloat(m.monto||0).toFixed(2)}`, { lineGap: 1 });
+          });
+          doc.moveDown(0.5);
+          doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#e2e8f0').lineWidth(1).stroke();
+          doc.moveDown(0.5);
+        }
+
+        // ── Pie ──
+        doc.fontSize(9).fillColor('#94a3b8').font('Helvetica')
+           .text(`MetricPOS v7.3 — Turno cerrado el ${ahora}`, { align: 'center' });
+
+        doc.end();
+      });
+
+      // Guardar PDF en la tabla turnos para poder servirlo por token
+      pdfToken = uuid();
+      run(`UPDATE turnos SET pdf_cierre=?, pdf_token=? WHERE id=?`, [pdfBase64, pdfToken, turno_id]);
+      saveDB();
+    }
+  } catch(pdfErr) {
+    console.error('Error generando PDF de turno:', pdfErr.message);
+  }
+
+  // URL pública del PDF (sin autenticación — TextMeBot la necesita accesible)
+  const serverUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : process.env.SERVER_URL || 'http://localhost:3000';
+  const pdfPublicUrl = pdfToken ? `${serverUrl}/public/pdf-turno/${pdfToken}` : null;
+
+  // ── Enviar a cada número ─────────────────────────────────────────────────────
+  const resultados = [];
+  for (const wa of numeros) {
+    try {
+      // 1. Mensaje de texto con corte
+      await _textmebotEnviar({ numero: wa.numero, apikey: wa.callmebot_apikey, mensaje: mensaje_corte });
+      await new Promise(r => setTimeout(r, 5000));
+      // 2. Mensaje de texto con artículos
+      await _textmebotEnviar({ numero: wa.numero, apikey: wa.callmebot_apikey, mensaje: mensaje_articulos });
+      await new Promise(r => setTimeout(r, 5000));
+      // 3. PDF adjunto si se generó correctamente
+      if (pdfPublicUrl) {
+        const turnoLetra = get(`SELECT turno_letra FROM turnos WHERE id=?`, [turno_id])?.turno_letra || 'A';
+        await _textmebotEnviar({
+          numero:    wa.numero,
+          apikey:    wa.callmebot_apikey,
+          pdfUrl:    pdfPublicUrl,
+          pdfNombre: `Cierre_Turno_${turnoLetra}.pdf`,
+          mensaje:   `📄 Reporte PDF — Cierre Turno ${turnoLetra}`
+        });
+        await new Promise(r => setTimeout(r, 5000));
+      }
+      resultados.push({ nombre: wa.nombre, ok: true, pdf: !!pdfPublicUrl });
+    } catch(e) {
+      resultados.push({ nombre: wa.nombre, ok: false, error: e.message });
+    }
+  }
+  res.json({ ok: true, enviados: resultados.filter(r=>r.ok).length, total: numeros.length, pdf_generado: !!pdfBase64, detalle: resultados });
+});
+
+// ── TICKETS ──
+
+// Listar tickets con filtros (admin/supervisor ven todos; cajero solo los suyos)
+app.get('/api/tickets', auth(), (req, res) => {
+  try {
+    const rol = req.user.rol;
+    const { estado, prioridad, area, asignado_a } = req.query;
+    let w = rol === 'cajero' ? `WHERE t.cajero_id='${req.user.id}'` : 'WHERE 1=1';
+    if (estado)     w += ` AND t.estado='${estado}'`;
+    if (prioridad)  w += ` AND t.prioridad='${prioridad}'`;
+    if (area)       w += ` AND t.area='${area}'`;
+    if (asignado_a) w += ` AND t.asignado_a='${asignado_a}'`;
+    const rows = all(`SELECT t.*, u.nombre as cajero_nombre2
+      FROM tickets t LEFT JOIN usuarios u ON u.id=t.cajero_id
+      ${w} ORDER BY
+        CASE t.prioridad WHEN 'urgente' THEN 1 WHEN 'alta' THEN 2 WHEN 'media' THEN 3 ELSE 4 END,
+        t.creado DESC LIMIT 200`);
+    rows.forEach(t => {
+      const ult = get(`SELECT mensaje, usuario_nombre, creado FROM ticket_mensajes
+        WHERE ticket_id=? ORDER BY id DESC LIMIT 1`, [t.id]);
+      t.ultimo_mensaje = ult || null;
+      t.total_mensajes = (get(`SELECT COUNT(*) as c FROM ticket_mensajes WHERE ticket_id=?`, [t.id])||{}).c||0;
+    });
+    res.json(rows);
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Crear ticket (manual o automático al cerrar turno)
+app.post('/api/tickets', auth(), (req, res) => {
+  try {
+    const { turno_id, turno_letra, fecha_cierre, total_ventas, reporte_articulos,
+            area, titulo, tipo, descripcion, prioridad, asignado_a, fotos } = req.body;
+    const id = uuid();
+    // Obtener nombre del asignado
+    let asigNombre = '';
+    if (asignado_a) {
+      const u = get(`SELECT nombre FROM usuarios WHERE id=?`, [asignado_a]);
+      asigNombre = u?.nombre || '';
+    }
+    run(`INSERT INTO tickets(id,turno_id,cajero_id,cajero_nombre,turno_letra,fecha_cierre,
+          total_ventas,reporte_articulos,area,titulo,tipo,descripcion,prioridad,asignado_a,asignado_nombre,fotos)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, turno_id||null, req.user.id, req.user.nombre, turno_letra||null,
+       fecha_cierre||null, total_ventas||0, reporte_articulos||'',
+       area||null, titulo||null, tipo||null, descripcion||null,
+       prioridad||'media', asignado_a||null, asigNombre,
+       JSON.stringify(fotos||[])]);
+    saveDB();
+    res.json({ id });
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Obtener un ticket con sus mensajes
+// Stats del dashboard de tickets
+app.get('/api/tickets/stats', auth(), (req, res) => {
+  try {
+    const rol = req.user.rol;
+    let base = rol === 'cajero' ? `WHERE cajero_id='${req.user.id}'` : '';
+    const total     = (get(`SELECT COUNT(*) as c FROM tickets ${base}`)||{}).c||0;
+    const abiertos  = (get(`SELECT COUNT(*) as c FROM tickets ${base?base+' AND':' WHERE'} estado='abierto'`)||{}).c||0;
+    const revision  = (get(`SELECT COUNT(*) as c FROM tickets ${base?base+' AND':' WHERE'} estado='en_revision'`)||{}).c||0;
+    const resueltos = (get(`SELECT COUNT(*) as c FROM tickets ${base?base+' AND':' WHERE'} estado='resuelto'`)||{}).c||0;
+    res.json({ total, abiertos, revision, resueltos });
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Badge: tickets abiertos sin respuesta (para notificación en menú)
+app.get('/api/tickets/badge', auth(), (req, res) => {
+  try {
+    const rol = req.user.rol;
+    let count;
+    if (rol === 'cajero') {
+      count = (get(`SELECT COUNT(*) as c FROM tickets WHERE cajero_id=? AND estado!='resuelto'`,
+        [req.user.id])||{}).c||0;
+    } else {
+      count = (get(`SELECT COUNT(*) as c FROM tickets WHERE estado='abierto'`)||{}).c||0;
+    }
+    res.json({ count });
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// ── BANCOS ──
+
+app.get('/api/tickets/:id', auth(), (req, res) => {
+  try {
+    const t = get(`SELECT * FROM tickets WHERE id=?`, [req.params.id]);
+    if (!t) return res.status(404).json({error:'Ticket no encontrado'});
+    t.mensajes = all(`SELECT * FROM ticket_mensajes WHERE ticket_id=? ORDER BY id ASC`, [req.params.id]);
+    res.json(t);
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Agregar mensaje a un ticket
+app.post('/api/tickets/:id/mensajes', auth(), (req, res) => {
+  try {
+    const t = get(`SELECT * FROM tickets WHERE id=?`, [req.params.id]);
+    if (!t) return res.status(404).json({error:'Ticket no encontrado'});
+    const { mensaje } = req.body;
+    if (!mensaje?.trim()) return res.status(400).json({error:'Mensaje vacío'});
+    run(`INSERT INTO ticket_mensajes(ticket_id,usuario_id,usuario_nombre,usuario_rol,mensaje)
+      VALUES(?,?,?,?,?)`,
+      [req.params.id, req.user.id, req.user.nombre, req.user.rol, mensaje.trim()]);
+    // Si supervisor/admin responde → pasa a en_revision; si resuelto lo marca
+    if (req.user.rol !== 'cajero' && t.estado === 'abierto') {
+      run(`UPDATE tickets SET estado='en_revision' WHERE id=?`, [req.params.id]);
+    }
+    saveDB();
+    res.json({ok:1});
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+// Cambiar estado del ticket (supervisor/admin)
+app.put('/api/tickets/:id/estado', auth(['admin','supervisor']), async (req, res) => {
+  try {
+    const { estado, resolucion, adjunto_resolucion } = req.body;
+    if (!['abierto','en_revision','resuelto'].includes(estado))
+      return res.status(400).json({error:'Estado inválido'});
+
+    // ── Validaciones solo al resolver ────────────────────────────────────────
+    if (estado === 'resuelto') {
+      const ticket = get(`SELECT * FROM tickets WHERE id=?`, [req.params.id]);
+      if (!ticket) return res.status(404).json({error:'Ticket no encontrado'});
+
+      // 1. Verificar que sea ticket de turno
+      if (ticket.turno_id) {
+        // 2. Debe tener adjunto (fotos existentes O adjunto nuevo enviado)
+        const fotosExistentes = JSON.parse(ticket.fotos||'[]');
+        if (!fotosExistentes.length && !adjunto_resolucion) {
+          return res.status(400).json({
+            error: 'Este ticket de turno requiere un documento adjunto antes de marcarse como Resuelto.',
+            code: 'ADJUNTO_REQUERIDO'
+          });
+        }
+
+        // 3. Generar PDF de resolución
+        let pdfBase64 = null;
+        try {
+          const mensajes = all(
+            `SELECT m.*,u.nombre as u_nombre FROM ticket_mensajes m
+             LEFT JOIN usuarios u ON u.id=m.usuario_id
+             WHERE m.ticket_id=? ORDER BY m.creado`,
+            [req.params.id]
+          );
+
+          pdfBase64 = await new Promise((resolve, reject) => {
+            const doc = new PDFDocument({ margin: 50, size: 'A4' });
+            const chunks = [];
+            doc.on('data',  c => chunks.push(c));
+            doc.on('end',   () => resolve(Buffer.concat(chunks).toString('base64')));
+            doc.on('error', reject);
+
+            const empresa = ticket.cajero_nombre ? ticket.cajero_nombre : 'MetricPOS';
+            const ahora   = new Date(new Date().getTime() - 6*3600000)
+                              .toISOString().replace('T',' ').substring(0,19);
+
+            // ── Encabezado ──
+            doc.fontSize(16).fillColor('#1e3a5f')
+               .text('RESOLUCIÓN DE TICKET DE TURNO', { align: 'center' });
+            doc.moveDown(0.3);
+            doc.fontSize(10).fillColor('#64748b')
+               .text(`Generado: ${ahora}`, { align: 'center' });
+            doc.moveDown(0.5);
+            doc.moveTo(50,doc.y).lineTo(545,doc.y).strokeColor('#1e3a5f').lineWidth(2).stroke();
+            doc.moveDown(0.5);
+
+            // ── Datos del ticket ──
+            const campos = [
+              ['Ticket',    ticket.id.substring(0,8).toUpperCase()],
+              ['Título',    ticket.titulo || `Turno ${ticket.turno_letra||'A'}`],
+              ['Cajero',    ticket.cajero_nombre || '—'],
+              ['Turno',     ticket.turno_letra   || 'A'],
+              ['Cierre',    ticket.fecha_cierre  || '—'],
+              ['Total Vtas','L. '+(parseFloat(ticket.total_ventas||0).toFixed(2))],
+              ['Área',      ticket.area     || 'Caja'],
+              ['Prioridad', ticket.prioridad|| 'media'],
+            ];
+            doc.fontSize(10).fillColor('#1e293b');
+            campos.forEach(([l,v]) => {
+              doc.font('Helvetica-Bold').text(`${l}: `, { continued: true })
+                 .font('Helvetica').text(v);
+            });
+            doc.moveDown(0.5);
+            doc.moveTo(50,doc.y).lineTo(545,doc.y).strokeColor('#e2e8f0').lineWidth(1).stroke();
+            doc.moveDown(0.5);
+
+            // ── Reporte de artículos ──
+            if (ticket.reporte_articulos) {
+              doc.fontSize(11).fillColor('#1e3a5f').font('Helvetica-Bold')
+                 .text('ARTÍCULOS VENDIDOS EN EL TURNO');
+              doc.moveDown(0.2);
+              doc.fontSize(8).fillColor('#1e293b').font('Courier')
+                 .text(ticket.reporte_articulos, { lineGap: 2 });
+              doc.moveDown(0.5);
+              doc.moveTo(50,doc.y).lineTo(545,doc.y).strokeColor('#e2e8f0').lineWidth(1).stroke();
+              doc.moveDown(0.5);
+            }
+
+            // ── Historial de mensajes ──
+            if (mensajes.length) {
+              doc.fontSize(11).fillColor('#1e3a5f').font('Helvetica-Bold')
+                 .text('HISTORIAL DE MENSAJES');
+              doc.moveDown(0.3);
+              mensajes.forEach(m => {
+                doc.fontSize(9).fillColor('#64748b').font('Helvetica-Bold')
+                   .text(`${m.u_nombre||'Sistema'} — ${(m.creado||'').substring(0,16)}`);
+                doc.fontSize(9).fillColor('#1e293b').font('Helvetica')
+                   .text(m.mensaje, { lineGap: 2 });
+                doc.moveDown(0.3);
+              });
+              doc.moveTo(50,doc.y).lineTo(545,doc.y).strokeColor('#e2e8f0').lineWidth(1).stroke();
+              doc.moveDown(0.5);
+            }
+
+            // ── Texto de resolución ──
+            if (resolucion) {
+              doc.fontSize(11).fillColor('#059669').font('Helvetica-Bold')
+                 .text('RESOLUCIÓN / OBSERVACIONES DEL SUPERVISOR');
+              doc.moveDown(0.2);
+              doc.fontSize(10).fillColor('#1e293b').font('Helvetica')
+                 .text(resolucion, { lineGap: 3 });
+              doc.moveDown(0.5);
+            }
+
+            // ── Firma final ──
+            doc.moveTo(50,doc.y).lineTo(545,doc.y).strokeColor('#1e3a5f').lineWidth(2).stroke();
+            doc.moveDown(0.5);
+            doc.fontSize(9).fillColor('#94a3b8').font('Helvetica')
+               .text(`MetricPOS v7.3 — Ticket resuelto el ${ahora}`, { align: 'center' });
+
+            doc.end();
+          });
+        } catch(pdfErr) {
+          console.error('Error generando PDF:', pdfErr.message);
+        }
+
+        // Generar token público de un solo uso (expira en 24h — se verifica en el endpoint)
+        const pdfToken = pdfBase64 ? uuid() : null;
+
+        // Procesar adjunto del supervisor: extraer MIME y base64 puro desde data URL
+        let adjuntoBase64puro = null;
+        let adjuntoMime       = null;
+        let adjuntoToken      = null;
+        if (adjunto_resolucion) {
+          // adjunto_resolucion viene como data URL: "data:image/jpeg;base64,XXXXX"
+          const match = adjunto_resolucion.match(/^data:([^;]+);base64,(.+)$/s);
+          if (match) {
+            adjuntoMime      = match[1];          // ej. "image/jpeg" o "application/pdf"
+            adjuntoBase64puro = match[2];
+            adjuntoToken     = uuid();
+          }
+        }
+
+        // Guardar PDF y adjunto original en el ticket
+        const fotosActuales = JSON.parse(ticket.fotos||'[]');
+        const fotasFinales  = adjunto_resolucion
+          ? [...fotosActuales, adjunto_resolucion]
+          : fotosActuales;
+
+        run(`UPDATE tickets SET
+               estado=?,
+               resolucion=?,
+               pdf_resolucion=?,
+               pdf_token=?,
+               fotos=?,
+               adjunto_token=?,
+               adjunto_mime=?
+             WHERE id=?`,
+          [estado, resolucion||null, pdfBase64, pdfToken, JSON.stringify(fotasFinales),
+           adjuntoToken||null, adjuntoMime||null, req.params.id]
+        );
+        saveDB();
+
+        // 4. Envío automático TextMeBot a números configurados
+        const numeros = all(`SELECT * FROM whatsapp_numeros WHERE activo=1 AND callmebot_apikey IS NOT NULL AND callmebot_apikey != ''`);
+        if (numeros.length) {
+          const serverUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+            ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+            : process.env.SERVER_URL || 'http://localhost:3000';
+
+          const pdfPublicUrl     = pdfToken     ? `${serverUrl}/public/pdf/${pdfToken}`         : null;
+          const adjuntoPublicUrl = adjuntoToken ? `${serverUrl}/public/adjunto/${adjuntoToken}` : null;
+
+          const msg = `✅ *MetricPOS — Ticket Resuelto*\n`
+            + `🎫 ${ticket.titulo || 'Turno '+ticket.turno_letra}\n`
+            + `👤 Cajero: ${ticket.cajero_nombre||'—'}\n`
+            + `💰 Total: L. ${parseFloat(ticket.total_ventas||0).toFixed(2)}\n`
+            + `📝 ${resolucion || 'Sin observaciones'}\n`
+            + `🕐 ${new Date(new Date().getTime()-6*3600000).toISOString().replace('T',' ').substring(0,16)}`;
+
+          (async () => {
+            for (const wa of numeros) {
+              try {
+                // 1. Texto de notificación
+                await _textmebotEnviar({ numero: wa.numero, apikey: wa.callmebot_apikey, mensaje: msg });
+                await new Promise(r => setTimeout(r, 5000));
+
+                // 2. PDF de resolución generado por MetricPOS
+                if (pdfPublicUrl) {
+                  await _textmebotEnviar({
+                    numero:    wa.numero,
+                    apikey:    wa.callmebot_apikey,
+                    pdfUrl:    pdfPublicUrl,
+                    pdfNombre: `Resolucion_Turno_${ticket.turno_letra||'A'}.pdf`,
+                    mensaje:   `📄 Resolución del turno ${ticket.turno_letra||'A'}`
+                  });
+                  await new Promise(r => setTimeout(r, 5000));
+                }
+
+                // 3. Documento adjunto del supervisor (imagen o PDF original)
+                if (adjuntoPublicUrl) {
+                  const esPdf  = adjuntoMime === 'application/pdf';
+                  const ext    = adjuntoMime ? adjuntoMime.split('/')[1].split('+')[0] : 'jpg';
+                  const nombre = `Adjunto_Turno_${ticket.turno_letra||'A'}.${esPdf ? 'pdf' : ext}`;
+                  await _textmebotEnviar({
+                    numero:    wa.numero,
+                    apikey:    wa.callmebot_apikey,
+                    pdfUrl:    adjuntoPublicUrl,
+                    pdfNombre: nombre,
+                    mensaje:   `📎 Documento adjunto del supervisor — Turno ${ticket.turno_letra||'A'}`
+                  });
+                  await new Promise(r => setTimeout(r, 5000));
+                }
+              } catch(e) { console.error('TextMeBot error:', e.message); }
+            }
+          })();
+        }
+
+        return res.json({ ok:1, pdf_generado: !!pdfBase64, adjunto_enviado: !!adjuntoToken });
+      }
+    }
+
+    // Para tickets sin turno_id o estados no-resuelto: flujo normal
+    run(`UPDATE tickets SET estado=? WHERE id=?`, [estado, req.params.id]);
+    saveDB();
+    res.json({ok:1});
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
+
+// Descarga pública del PDF de cierre de turno por token (sin autenticación — válido 24h)
+app.get('/public/pdf-turno/:token', (req, res) => {
+  try {
+    const turno = get(
+      `SELECT pdf_cierre, pdf_token, turno_letra,
+              datetime(fecha_cierre, '+24 hours') as expira
+       FROM turnos WHERE pdf_token=?`,
+      [req.params.token]
+    );
+    if (!turno?.pdf_cierre) {
+      return res.status(404).send('<h2>PDF no disponible o link expirado</h2>');
+    }
+    const ahora = new Date(new Date().getTime() - 6*3600000).toISOString().replace('T',' ').substring(0,19);
+    if (turno.expira && ahora > turno.expira) {
+      return res.status(410).send('<h2>Este link ha expirado (válido 24 horas)</h2>');
+    }
+    const buf    = Buffer.from(turno.pdf_cierre, 'base64');
+    const nombre = `Cierre_Turno_${turno.turno_letra||'A'}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${nombre}"`);
+    res.send(buf);
+  } catch(e) { res.status(500).send('Error: ' + e.message); }
+});
+
+// Descarga pública del adjunto del supervisor por token (sin autenticación — válido 24h)
+app.get('/public/adjunto/:token', (req, res) => {
+  try {
+    const ticket = get(
+      `SELECT fotos, adjunto_token, adjunto_mime, turno_letra, estado,
+              datetime(creado, '+24 hours') as expira
+       FROM tickets WHERE adjunto_token=? AND estado='resuelto'`,
+      [req.params.token]
+    );
+    if (!ticket) return res.status(404).send('<h2>Adjunto no disponible o link expirado</h2>');
+
+    // Verificar expiración 24h
+    const ahora = new Date(new Date().getTime() - 6*3600000).toISOString().replace('T',' ').substring(0,19);
+    if (ticket.expira && ahora > ticket.expira) {
+      return res.status(410).send('<h2>Este link ha expirado (válido 24 horas)</h2>');
+    }
+
+    // El adjunto está guardado en fotos[] como el último elemento (data URL o base64 puro)
+    const fotos = JSON.parse(ticket.fotos || '[]');
+    // Buscar el adjunto: puede ser data URL "data:mime;base64,XXX" o base64 puro
+    // El adjunto del supervisor siempre es el último que se agregó con adjunto_resolucion
+    const adjuntoRaw = fotos[fotos.length - 1];
+    if (!adjuntoRaw) return res.status(404).send('<h2>Adjunto no encontrado</h2>');
+
+    let mime = ticket.adjunto_mime || 'application/octet-stream';
+    let buf;
+    const match = adjuntoRaw.match(/^data:([^;]+);base64,(.+)$/s);
+    if (match) {
+      mime = match[1];
+      buf  = Buffer.from(match[2], 'base64');
+    } else {
+      buf = Buffer.from(adjuntoRaw, 'base64');
+    }
+
+    const ext    = mime.split('/')[1]?.split('+')[0] || 'bin';
+    const nombre = `Adjunto_Turno_${ticket.turno_letra||'A'}.${ext}`;
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Content-Disposition', `inline; filename="${nombre}"`);
+    res.send(buf);
+  } catch(e) { res.status(500).send('Error: ' + e.message); }
+});
+
+// Descarga pública de PDF por token (sin autenticación — válido 24h desde resolución)
+app.get('/public/pdf/:token', (req, res) => {
+  try {
+    const ticket = get(
+      `SELECT pdf_resolucion, pdf_token, titulo, turno_letra, estado,
+              datetime(creado, '+24 hours') as expira
+       FROM tickets WHERE pdf_token=? AND estado='resuelto'`,
+      [req.params.token]
+    );
+    if (!ticket?.pdf_resolucion) {
+      return res.status(404).send('<h2>PDF no disponible o link expirado</h2>');
+    }
+    // Verificar expiración 24h (comparando con hora Honduras UTC-6)
+    const ahora = new Date(new Date().getTime() - 6*3600000).toISOString().replace('T',' ').substring(0,19);
+    if (ticket.expira && ahora > ticket.expira) {
+      return res.status(410).send('<h2>Este link ha expirado (válido 24 horas)</h2>');
+    }
+    const buf = Buffer.from(ticket.pdf_resolucion, 'base64');
+    const nombre = `Resolucion_Turno_${ticket.turno_letra||'A'}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${nombre}"`);
+    res.send(buf);
+  } catch(e) { res.status(500).send('Error: '+e.message); }
+});
+
+// Descarga PDF autenticada (para uso interno desde el módulo de tickets)
+app.get('/api/tickets/:id/pdf', auth(), (req, res) => {
+  try {
+    const ticket = get(`SELECT pdf_resolucion, titulo, turno_letra FROM tickets WHERE id=?`, [req.params.id]);
+    if (!ticket?.pdf_resolucion) return res.status(404).json({error:'PDF no disponible'});
+    const buf = Buffer.from(ticket.pdf_resolucion, 'base64');
+    const nombre = `Resolucion_Turno_${ticket.turno_letra||'A'}.pdf`;
+    res.setHeader('Content-Type','application/pdf');
+    res.setHeader('Content-Disposition',`attachment; filename="${nombre}"`);
+    res.send(buf);
+  } catch(e) { res.status(500).json({error: e.message}); }
+});
+
 // ── BANCOS ──
 app.get('/api/bancos',auth(),(req,res)=>res.json(all(`SELECT * FROM bancos WHERE activo=1 ORDER BY nombre`)));
 app.get('/api/bancos/consolidacion',auth(),(req,res)=>{
@@ -1099,8 +1917,14 @@ app.get('/{*path}',(req,res)=>res.sendFile(path.join(__dirname,'public','index.h
 
 initDB().then(()=>{
   app.listen(PORT,'0.0.0.0',()=>{
-    console.log(`\n🚀 Metric POS v7.4 (Railway) → http://0.0.0.0:${PORT}`);
-  console.log(`   BD: ${DB_FILE}`);
-    console.log(`   Login: admin / admin123\n`);
+    const env = process.env.NODE_ENV || 'development';
+    const url = process.env.RAILWAY_PUBLIC_DOMAIN
+      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+      : process.env.SERVER_URL || `http://localhost:${PORT}`;
+    console.log(`\n🚀 MetricPOS v7.3 [${env.toUpperCase()}]`);
+    console.log(`   URL:    ${url}`);
+    console.log(`   Puerto: ${PORT}`);
+    console.log(`   BD:     ${DB_FILE}`);
+    console.log(`   Login:  admin / admin123\n`);
   });
 }).catch(err=>{console.error(err);process.exit(1);});
